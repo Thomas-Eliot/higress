@@ -1,0 +1,25 @@
+version: 1.0
+name: higress-gateway
+
+privatecloud:
+  version: v3
+
+dependencies:
+  base:
+    go: 1.21.7
+
+machine:
+  standard:
+    7u2_docker_313:
+      - default
+
+scripts:
+  - sh build-aistack.sh
+
+artifacts:
+  packages:
+    - higress-gateway.tar.gz
+
+notifications:
+  email:
+    - lvshui.wqs@alibaba-inc.com
