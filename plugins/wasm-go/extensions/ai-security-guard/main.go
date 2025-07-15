@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	my_credentials "github.com/alibaba/higress/plugins/wasm-go/extensions/ai-security-guard/my-credentials"
 	mrand "math/rand"
 	"net/http"
 	"net/url"
@@ -60,6 +61,12 @@ const (
 
 	AliyunUserAgent = "CIPFrom/AIGateway"
 	LengthLimit     = 1800
+
+	// Credential type, including access_key, sts, oidc_role_arn
+	AccessKey = "access_key"
+	// 这也还没支持
+	STS  = "sts"
+	RRSA = "oidc_role_arn"
 )
 
 type Response struct {
@@ -89,7 +96,14 @@ type Advice struct {
 }
 
 type AISecurityConfig struct {
-	client                        wrapper.HttpClient
+	client wrapper.HttpClient
+	// Credential type, including access_key, oidc_role_arn. default is access_key
+	credentialType                string
+	stsServiceHost                string
+	stsServiceName                string
+	stsServicePort                int64
+	rrsaInfoServiceName           string
+	rrsaInfoServicePort           int64
 	ak                            string
 	sk                            string
 	token                         string
@@ -106,6 +120,7 @@ type AISecurityConfig struct {
 	riskLevelBar                  string
 	timeout                       uint32
 	metrics                       map[string]proxywasm.MetricCounter
+	credentialProvider            *my_credentials.OIDCCredentialsProvider
 }
 
 func (config *AISecurityConfig) incrementCounter(metricName string, inc uint64) {
@@ -182,11 +197,45 @@ func parseConfig(json gjson.Result, config *AISecurityConfig, log log.Log) error
 	if serviceName == "" || servicePort == 0 || serviceHost == "" {
 		return errors.New("invalid service config")
 	}
-	config.ak = json.Get("accessKey").String()
-	config.sk = json.Get("secretKey").String()
-	if config.ak == "" || config.sk == "" {
-		return errors.New("invalid AK/SK config")
+	config.credentialType = json.Get("credentialType").String()
+	if config.credentialType == "" {
+		config.credentialType = AccessKey
 	}
+
+	if config.credentialType == AccessKey {
+		config.ak = json.Get("accessKey").String()
+		config.sk = json.Get("secretKey").String()
+		if config.ak == "" || config.sk == "" {
+			return errors.New("invalid AK/SK config")
+		}
+	} else if config.credentialType == RRSA {
+		//config.stsServiceHost = json.Get("stsServiceHost").String()
+		//if config.stsServiceHost == "" {
+		//	return errors.New("invalid stsServiceHost config")
+		//}
+		//config.stsServiceName = json.Get("stsServiceName").String()
+		//if config.stsServiceName == "" {
+		//	return errors.New("invalid stsServiceName config")
+		//}
+		//config.stsServicePort = json.Get("stsServicePort").Int()
+		//if config.stsServicePort == 0 {
+		//	return errors.New("invalid stsServicePort config")
+		//}
+		config.rrsaInfoServiceName = json.Get("rrsaInfoServiceName").String()
+		if config.rrsaInfoServiceName == "" {
+			return errors.New("invalid rrsaInfoServiceName config")
+		}
+		config.rrsaInfoServicePort = json.Get("rrsaInfoServicePort").Int()
+		if config.rrsaInfoServiceName == "" {
+			return errors.New("invalid rrsaInfoServicePort config")
+		}
+
+		initCredentialProvider(config)
+
+	} else {
+		return errors.New("invalid credentialType config :" + config.credentialType)
+	}
+
 	config.token = json.Get("securityToken").String()
 	config.checkRequest = json.Get("checkRequest").Bool()
 	config.checkResponse = json.Get("checkResponse").Bool()
@@ -242,6 +291,43 @@ func parseConfig(json gjson.Result, config *AISecurityConfig, log log.Log) error
 	})
 	config.metrics = make(map[string]proxywasm.MetricCounter)
 	return nil
+}
+
+func initCredentialProvider(config *AISecurityConfig) {
+	// 使用OIDCRoleArn初始化SDK客户端
+	credentialProvider, err := my_credentials.NewOIDCCredentialsProviderBuilder().
+		WithRrsaInfoServiceName(config.rrsaInfoServiceName).
+		WithRrsaInfoServicePort(config.rrsaInfoServicePort).
+		//WithStsServiceHost(config.stsServiceHost).
+		//WithStsServiceName(config.stsServiceName).
+		//WithStsServicePort(config.stsServicePort).
+		// "<ROLE_SESSION_NAME>" 必填参数：自定义角色会话名称。示例值：alice。
+		WithRoleSessionName("ai-security-guard-session").
+		// <STS_ENDPOINT>：设置STS的访问地址，必填。示例值：https://sts.aliyuncs.com。
+		//WithHttpClient(config.client).
+		Build()
+	if err != nil {
+		log.Errorf("NewOIDCCredentialsProviderBuilder error: %v", err)
+		return
+	}
+	config.credentialProvider = credentialProvider
+}
+func generateRrsaCredential(config *AISecurityConfig, callback func(), log log.Log) {
+	log.Debug("start generateRrsaCredential")
+	if config.credentialType != RRSA {
+		callback()
+		return
+	}
+
+	var GetCredentialsCallBack = func(cred *my_credentials.Credentials) {
+		log.Debugf("start GetCredentialsCallBack，%v", cred)
+		config.ak = cred.AccessKeyId
+		config.sk = cred.AccessKeySecret
+		config.token = cred.SecurityToken
+		callback()
+	}
+
+	config.credentialProvider.GetCredentialsV3(GetCredentialsCallBack)
 }
 
 func generateRandomID() string {
@@ -366,7 +452,8 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AISecurityConfig, body []
 			proxywasm.ResumeHttpRequest()
 		}
 	}
-	singleCall()
+
+	generateRrsaCredential(&config, singleCall, log)
 	return types.ActionPause
 }
 
@@ -496,7 +583,8 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AISecurityConfig, body [
 			proxywasm.ResumeHttpResponse()
 		}
 	}
-	singleCall()
+	//singleCall()
+	generateRrsaCredential(&config, singleCall, log)
 	return types.ActionPause
 }
 
