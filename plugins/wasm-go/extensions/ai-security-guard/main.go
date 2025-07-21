@@ -58,6 +58,7 @@ const (
 	DefaultDenyCode                  = 200
 	DefaultDenyMessage               = "很抱歉，我无法回答您的问题"
 	DefaultTimeout                   = 2000
+	DefaultDenyResponseDataLog       = true
 
 	AliyunUserAgent = "CIPFrom/AIGateway"
 	LengthLimit     = 1800
@@ -83,10 +84,11 @@ type Data struct {
 }
 
 type Result struct {
-	RiskWords   string  `json:"RiskWords,omitempty"`
-	Description string  `json:"Description,omitempty"`
-	Confidence  float64 `json:"Confidence,omitempty"`
-	Label       string  `json:"Label,omitempty"`
+	RiskWords     string                   `json:"RiskWords,omitempty"`
+	Description   string                   `json:"Description,omitempty"`
+	Confidence    float64                  `json:"Confidence,omitempty"`
+	Label         string                   `json:"Label,omitempty"`
+	CustomizedHit []map[string]interface{} `json:"CustomizedHit,omitempty"`
 }
 
 type Advice struct {
@@ -121,6 +123,7 @@ type AISecurityConfig struct {
 	timeout                       uint32
 	metrics                       map[string]proxywasm.MetricCounter
 	credentialProvider            *my_credentials.OIDCCredentialsProvider
+	denyResponseDataLog           bool
 }
 
 func (config *AISecurityConfig) incrementCounter(metricName string, inc uint64) {
@@ -241,6 +244,13 @@ func parseConfig(json gjson.Result, config *AISecurityConfig, log log.Log) error
 	config.checkResponse = json.Get("checkResponse").Bool()
 	config.protocolOriginal = json.Get("protocol").String() == "original"
 	config.denyMessage = json.Get("denyMessage").String()
+	config.denyResponseDataLog = json.Get("denyResponseDataLog").Bool()
+	if obj := json.Get("denyResponseDataLog"); obj.Exists() {
+		config.denyResponseDataLog = obj.Bool()
+	} else {
+		config.denyResponseDataLog = DefaultDenyResponseDataLog
+	}
+
 	if obj := json.Get("denyCode"); obj.Exists() {
 		config.denyCode = obj.Int()
 	} else {
@@ -360,7 +370,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AISecurityConfig, body []
 	sessionID, _ := generateHexID(20)
 	var singleCall func()
 	callback := func(statusCode int, responseHeaders http.Header, responseBody []byte) {
-		log.Info(string(responseBody))
+		log.Debug(string(responseBody))
 		if statusCode != 200 || gjson.GetBytes(responseBody, "Code").Int() != 200 {
 			proxywasm.ResumeHttpRequest()
 			return
@@ -407,6 +417,9 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AISecurityConfig, body []
 		endTime := time.Now().UnixMilli()
 		ctx.SetUserAttribute("safecheck_request_rt", endTime-startTime)
 		ctx.SetUserAttribute("safecheck_status", "reqeust deny")
+		if config.denyResponseDataLog {
+			ctx.SetUserAttribute("safecheck_service_data", response.Data)
+		}
 		if response.Data.Advice != nil {
 			ctx.SetUserAttribute("safecheck_riskLabel", response.Data.Result[0].Label)
 			ctx.SetUserAttribute("safecheck_riskWords", response.Data.Result[0].RiskWords)
@@ -538,6 +551,9 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AISecurityConfig, body [
 		endTime := time.Now().UnixMilli()
 		ctx.SetUserAttribute("safecheck_response_rt", endTime-startTime)
 		ctx.SetUserAttribute("safecheck_status", "response deny")
+		if config.denyResponseDataLog {
+			ctx.SetUserAttribute("safecheck_service_data", response.Data)
+		}
 		if response.Data.Advice != nil {
 			ctx.SetUserAttribute("safecheck_riskLabel", response.Data.Result[0].Label)
 			ctx.SetUserAttribute("safecheck_riskWords", response.Data.Result[0].RiskWords)
