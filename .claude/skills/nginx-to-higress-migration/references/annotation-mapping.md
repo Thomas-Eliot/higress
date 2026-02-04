@@ -165,22 +165,109 @@ nginx.ingress.kubernetes.io/modsecurity-snippet: |
 # Basic rate limiting supported via plugin
 # Complex Lua-based rate limiting requires WASM
 nginx.ingress.kubernetes.io/limit-rps: "10"
-nginx.ingress.kubernetes.io/limit-connections: "5"
+ginx.ingress.kubernetes.io/limit-connections: "5"
 ```
 
 ### Other Unsupported
 ```yaml
 # NOT directly supported
 nginx.ingress.kubernetes.io/client-body-buffer-size
-nginx.ingress.kubernetes.io/proxy-buffering
-nginx.ingress.kubernetes.io/proxy-buffers-number
-nginx.ingress.kubernetes.io/proxy-buffer-size
-nginx.ingress.kubernetes.io/mirror-uri
-nginx.ingress.kubernetes.io/mirror-request-body
-nginx.ingress.kubernetes.io/grpc-backend
-nginx.ingress.kubernetes.io/custom-http-errors
-nginx.ingress.kubernetes.io/default-backend
+ginx.ingress.kubernetes.io/proxy-buffering
+ginx.ingress.kubernetes.io/proxy-buffers-number
+ginx.ingress.kubernetes.io/proxy-buffer-size
+ginx.ingress.kubernetes.io/mirror-uri
+ginx.ingress.kubernetes.io/mirror-request-body
+ginx.ingress.kubernetes.io/grpc-backend
+ginx.ingress.kubernetes.io/custom-http-errors
+ginx.ingress.kubernetes.io/default-backend
 ```
+
+## Additional nginx.ingress.kubernetes.io annotations considered (ADDED)
+
+Below are additional annotations commonly used with ingress-nginx that were not listed in the original mapping. For each I add a short note about whether Higress supports it directly, maps to an existing higress.io annotation, or typically requires a plugin/WASM/alternative configuration.
+
+### External Authentication (external auth)
+- `nginx.ingress.kubernetes.io/auth-url` — external auth request URL (commonly used with oauth2-proxy).
+  - Note: Often requires Higress auth plugin or a WASM extension; map to higress auth plugin if available, otherwise implement external auth as a plugin.
+- `nginx.ingress.kubernetes.io/auth-signin`
+- `nginx.ingress.kubernetes.io/auth-response-headers`
+- `nginx.ingress.kubernetes.io/auth-cache-duration`
+- `nginx.ingress.kubernetes.io/auth-cache-key`
+- `nginx.ingress.kubernetes.io/auth-tls-secret`
+- `nginx.ingress.kubernetes.io/auth-tls-verify-client`
+- `nginx.ingress.kubernetes.io/auth-tls-verify-depth`
+- `nginx.ingress.kubernetes.io/auth-tls-pass-certificate-to-upstream`
+
+Recommendation: Mark as "requires plugin" unless Higress offers a first-class external-auth mapping. Consider documenting a pattern using Higress auth filter or Envoy external authorization via wasm/plugin.
+
+### Session Affinity / Sticky
+- `nginx.ingress.kubernetes.io/affinity` (e.g., cookie)
+- `nginx.ingress.kubernetes.io/session-cookie-name`
+- `nginx.ingress.kubernetes.io/session-cookie-hash`
+- `nginx.ingress.kubernetes.io/session-cookie-path`
+- `nginx.ingress.kubernetes.io/session-cookie-expires`
+- `nginx.ingress.kubernetes.io/session-cookie-max-age`
+
+Note: Load-balancing / session-affinity features may map to higress.io/load-balance annotations or require service / upstream configuration. Recommend mapping these to Higress LB annotations or documenting implementation steps.
+
+### Proxy / Upstream Behavior
+- `nginx.ingress.kubernetes.io/proxy-next-upstream` (and `proxy-next-upstream-timeout`)
+- `nginx.ingress.kubernetes.io/upstream-vhost`
+- `nginx.ingress.kubernetes.io/proxy-protocol`
+- `nginx.ingress.kubernetes.io/proxy-redirect-from`
+- `nginx.ingress.kubernetes.io/proxy-redirect-to`
+
+Note: `proxy-next-upstream` is related to retry/failover behavior. Some keys already exist in mapping (tries); add these for completeness.
+
+### TLS / SSL related
+- `nginx.ingress.kubernetes.io/ssl-passthrough` — TLS passthrough to upstream
+  - Note: May require Higress to be configured in passthrough mode or use Service-type passthrough; document whether supported.
+- `nginx.ingress.kubernetes.io/hsts`
+- `nginx.ingress.kubernetes.io/hsts-max-age`
+- `nginx.ingress.kubernetes.io/hsts-include-subdomains`
+- `nginx.ingress.kubernetes.io/hsts-preload`
+- `nginx.ingress.kubernetes.io/ssl-dh-param`
+
+Recommendation: HSTS can be implemented via header annotations or via plugin. Document mapping (e.g., set headers or higress.io header controls) or mark as requires header-set plugin.
+
+### Proxy Cache
+- `nginx.ingress.kubernetes.io/proxy-cache`
+- `nginx.ingress.kubernetes.io/proxy-cache-key`
+- `nginx.ingress.kubernetes.io/proxy-cache-valid`
+- `nginx.ingress.kubernetes.io/proxy-cache-bypass`
+- `nginx.ingress.kubernetes.io/proxy-cache-use-stale`
+
+Note: If users rely on ingress-nginx proxy-cache, clarify whether Higress supports upstream caching or requires an external cache or plugin.
+
+### Real IP / Forwarded headers
+- `nginx.ingress.kubernetes.io/real-ip-header`
+- `nginx.ingress.kubernetes.io/set-real-ip-from`
+
+Note: Important for client IP detection and logging; verify Higress behavior for X-Forwarded-For and PROXY protocol.
+
+### Observability / Tracing / Logs
+- `nginx.ingress.kubernetes.io/enable-opentracing`
+- `nginx.ingress.kubernetes.io/opentracing-tracer`
+- `nginx.ingress.kubernetes.io/enable-access-log`
+
+Note: Map to Higress tracing and logging configuration or mark as plugin-needed.
+
+### Security / Server tokens
+- `nginx.ingress.kubernetes.io/server-tokens`
+
+Note: Often controlled via global config; mark in docs how to handle via Higress global config or snippets (snippets are unsupported; recommend plugin).
+
+### Other commonly used annotations
+- `nginx.ingress.kubernetes.io/upstream-vhost` (upstream Host header)
+- `nginx.ingress.kubernetes.io/grpc-backend` (listed as unsupported — note grpc pass-through may be supported via backend-protocol: "GRPC")
+- `nginx.ingress.kubernetes.io/custom-http-errors` (map to Higress error handling if available)
+- `nginx.ingress.kubernetes.io/default-backend` (document behavior)
+- Rate-limit variants: `nginx.ingress.kubernetes.io/limit-rps`, `nginx.ingress.kubernetes.io/limit-rpm`
+
+## Guidance & Next Steps
+- I recommend we add an explicit "Additional annotations considered" section (as above) to the mapping document and mark each entry as one of: "works as-is", "maps to higress.io/*", "requires plugin/WASM", or "needs investigation". The text added in this update follows that approach.
+
+- If you want a fully exhaustive comparison against the official ingress-nginx annotations page, I can fetch the upstream annotations list and produce a table marking each annotation's status. This will produce a larger PR but gives full confidence for migration.
 
 ## Migration Script
 
