@@ -1,0 +1,2091 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NGINX Ingress to Higress 迁移分析报告</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif; background: #f5f7fa; color: #333; line-height: 1.6; padding: 20px; }
+        .container { max-width: 1400px; margin: 0 auto; background: white; border-radius: 8px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); overflow: hidden; }
+        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; }
+        .header h1 { font-size: 28px; margin-bottom: 10px; }
+        .header .meta { opacity: 0.9; font-size: 14px; }
+        .section { padding: 30px; border-top: 1px solid #eee; }
+        .section h2 { font-size: 20px; margin-bottom: 20px; color: #333; display: flex; align-items: center; }
+        .section h2 .icon { margin-right: 10px; font-size: 24px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px; }
+        .stat-item { background: #f8f9fa; padding: 15px; border-radius: 6px; border-left: 3px solid #667eea; transition: all 0.3s; }
+        .stat-item.stat-clickable { cursor: pointer; }
+        .stat-item.stat-clickable:hover { background: #e8f0fe; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(102,126,234,0.2); }
+        .stat-item .label { font-size: 13px; color: #666; margin-bottom: 5px; }
+        .stat-item .count { font-size: 24px; font-weight: bold; color: #333; }
+        .issue-group { margin-bottom: 30px; }
+        .issue-group-header { font-size: 16px; color: #666; margin-bottom: 15px; padding: 12px 15px; border-left: 3px solid #e6a23c; background: #fafbfc; cursor: pointer; display: flex; justify-content: space-between; align-items: center; transition: all 0.3s; user-select: none; }
+        .issue-group-header:hover { background: #f0f2f5; }
+        .issue-group-header .group-title { font-weight: 600; }
+        .issue-group-header .group-icon { font-size: 12px; transition: transform 0.3s; }
+        .issue-group-header .group-icon.collapsed { transform: rotate(-90deg); }
+        .issue-group-content { max-height: 0; overflow: hidden; transition: max-height 0.3s ease-out; }
+        .issue-group-content.expanded { max-height: 100000px; transition: max-height 0.5s ease-in; }
+        .issue-item { background: #fff; border: 1px solid #e4e7ed; border-radius: 6px; margin-bottom: 15px; overflow: hidden; transition: box-shadow 0.3s; }
+        .issue-item:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.1); }
+        .issue-header { display: flex; align-items: center; padding: 15px; background: #fafbfc; cursor: pointer; user-select: none; }
+        .issue-header:hover { background: #f5f7fa; }
+        .checkbox-wrapper { margin-right: 15px; }
+        .checkbox-wrapper input[type="checkbox"] { width: 18px; height: 18px; cursor: pointer; }
+        .issue-title { flex: 1; display: flex; align-items: center; gap: 10px; }
+        .badge { display: inline-block; padding: 3px 8px; border-radius: 3px; font-size: 12px; font-weight: 500; }
+        .badge-danger { background: #fef0f0; color: #f56c6c; }
+        .badge-warning { background: #fdf6ec; color: #e6a23c; }
+        .badge-info { background: #f4f4f5; color: #909399; }
+        .badge-success { background: #f0f9ff; color: #409eff; }
+        .annotation-name { font-family: 'Monaco','Menlo','Courier New',monospace; font-size: 13px; color: #333; font-weight: 500; display: inline-flex; align-items: center; gap: 8px; }
+        .copy-btn { cursor: pointer; color: #909399; font-size: 14px; padding: 2px 6px; border-radius: 3px; transition: all 0.3s; opacity: 0; }
+        .annotation-name:hover .copy-btn { opacity: 1; }
+        .copy-btn:hover { color: #409eff; background: #ecf5ff; }
+        .ingress-count { color: #909399; font-size: 13px; }
+        .expand-icon { margin-left: auto; transition: transform 0.3s; color: #909399; }
+        .expand-icon.expanded { transform: rotate(180deg); }
+        .issue-content { display: none; padding: 15px; border-top: 1px solid #e4e7ed; }
+        .issue-content.expanded { display: block; }
+        .info-row { display: grid; grid-template-columns: 120px 1fr; padding: 8px 0; border-bottom: 1px solid #f5f7fa; }
+        .info-row:last-child { border-bottom: none; }
+        .info-label { font-weight: 500; color: #666; }
+        .info-value { color: #333; }
+        .ingress-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 5px; }
+        .ingress-tag { background: #ecf5ff; color: #409eff; padding: 2px 8px; border-radius: 3px; font-size: 12px; font-family: 'Monaco','Menlo','Courier New',monospace; }
+        .solution-box { background: #f0f9ff; border-left: 3px solid #409eff; padding: 12px; margin-top: 10px; border-radius: 4px; }
+        .solution-box h4 { color: #409eff; font-size: 14px; margin-bottom: 8px; }
+        .solution-box p { color: #666; font-size: 13px; line-height: 1.6; }
+        .action-box { background: #fff7e6; border-left: 3px solid #faad14; padding: 12px; margin-top: 10px; border-radius: 4px; }
+        .action-box h4 { color: #faad14; font-size: 14px; margin-bottom: 8px; }
+        .action-input { width: 100%; padding: 8px; border: 1px solid #d9d9d9; border-radius: 4px; font-size: 13px; margin-top: 5px; font-family: inherit; }
+        .action-input:focus { outline: none; border-color: #409eff; box-shadow: 0 0 0 2px rgba(64,158,255,0.1); }
+        .tab-buttons { display: flex; gap: 10px; border-bottom: 2px solid #e4e7ed; margin-bottom: 20px; }
+        .tab-button { padding: 12px 24px; background: none; border: none; border-bottom: 3px solid transparent; cursor: pointer; font-size: 15px; font-weight: 500; color: #606266; transition: all 0.3s; position: relative; bottom: -2px; }
+        .tab-button:hover { color: #409eff; }
+        .tab-button.active { color: #409eff; border-bottom-color: #409eff; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .toolbar { position: sticky; top: 0; background: white; padding: 15px 30px; border-bottom: 2px solid #e4e7ed; display: flex; gap: 10px; align-items: center; z-index: 100; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+        .btn { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: 500; transition: all 0.3s; }
+        .btn-primary { background: #409eff; color: white; }
+        .btn-primary:hover { background: #66b1ff; }
+        .btn-success { background: #67c23a; color: white; }
+        .btn-success:hover { background: #85ce61; }
+        .btn-secondary { background: #f4f4f5; color: #606266; }
+        .btn-secondary:hover { background: #e4e7ed; }
+        .filter-group { display: flex; gap: 10px; margin-left: auto; }
+        .filter-btn { padding: 6px 12px; border: 1px solid #dcdfe6; background: white; border-radius: 4px; cursor: pointer; font-size: 12px; transition: all 0.3s; }
+        .filter-btn.active { background: #409eff; color: white; border-color: #409eff; }
+        .conclusion-card { background: linear-gradient(135deg, #f5f7fa 0%, #e8f0fe 100%); padding: 20px; border-radius: 8px; border-left: 4px solid #409eff; }
+        .conclusion-result { display: flex; align-items: center; gap: 10px; }
+        .conclusion-label { font-size: 16px; font-weight: 500; color: #666; }
+        .conclusion-value { font-size: 20px; font-weight: bold; padding: 5px 15px; border-radius: 4px; background: white; }
+        .conclusion-value.risk-low { color: #67c23a; border: 2px solid #67c23a; }
+        .conclusion-value.risk-high { color: #f56c6c; border: 2px solid #f56c6c; }
+        .recommendations-new { margin-top: 10px; }
+        .recommendations-new > ul { list-style: none; padding-left: 0; }
+        .recommendations-new > ul > li { padding: 8px 0 8px 20px; position: relative; color: #666; font-size: 14px; }
+        .recommendations-new > ul > li:before { content: "→"; position: absolute; left: 0; color: #409eff; font-weight: bold; }
+        .priority-group { margin-bottom: 15px; border: 1px solid #e4e7ed; border-radius: 6px; overflow: hidden; }
+        .priority-header { display: flex; align-items: center; padding: 12px 15px; cursor: pointer; user-select: none; transition: background-color 0.3s; gap: 10px; }
+        .priority-header:hover { background-color: #f5f7fa; }
+        .priority-header.priority-p0 { background: #fef0f0; border-left: 4px solid #f56c6c; }
+        .priority-header.priority-p1 { background: #fdf6ec; border-left: 4px solid #e6a23c; }
+        .priority-header.priority-p2 { background: #f0f9ff; border-left: 4px solid #409eff; }
+        .priority-badge { font-weight: bold; font-size: 14px; padding: 3px 8px; border-radius: 3px; background: white; }
+        .priority-header.priority-p0 .priority-badge { color: #f56c6c; }
+        .priority-header.priority-p1 .priority-badge { color: #e6a23c; }
+        .priority-header.priority-p2 .priority-badge { color: #409eff; }
+        .priority-count { font-size: 13px; color: #909399; }
+        .priority-toggle-icon { margin-left: auto; transition: transform 0.3s; color: #909399; }
+        .priority-toggle-icon.collapsed { transform: rotate(-90deg); }
+        .priority-content { list-style: none; padding: 15px 20px 15px 40px; margin: 0; background: white; max-height: 1000px; overflow: hidden; transition: max-height 0.4s ease-in-out, padding 0.4s, opacity 0.3s; opacity: 1; }
+        .priority-content.collapsed { max-height: 0; padding-top: 0; padding-bottom: 0; opacity: 0; }
+        .priority-content.expanded { max-height: none; }
+        .priority-content li { padding: 6px 0 6px 15px; color: #606266; font-size: 14px; line-height: 1.6; position: relative; }
+        .priority-content li:before { content: "•"; position: absolute; left: 0; font-weight: bold; }
+        .priority-header.priority-p0 + .priority-content li:before { color: #f56c6c; }
+        .priority-header.priority-p1 + .priority-content li:before { color: #e6a23c; }
+        .priority-header.priority-p2 + .priority-content li:before { color: #409eff; }
+        @media print { body { background: white; } .toolbar { display: none; } .container { box-shadow: none; } }
+        @media (max-width: 768px) { .toolbar { flex-wrap: wrap; } .filter-group { width: 100%; margin-left: 0; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 NGINX Ingress to Higress 迁移分析报告</h1>
+            <div class="meta">
+                <span>生成时间: 2026-03-12 11:16:55</span> |
+                <span>分析 Ingress 数量: 11</span>
+            </div>
+        </div>
+
+        <div class="toolbar">
+            <button class="btn btn-primary" onclick="saveProgress()">💾 保存进度</button>
+            <button class="btn btn-success" onclick="exportReport()">📥 导出报告</button>
+            <button class="btn btn-secondary" onclick="expandAll()">展开全部</button>
+            <button class="btn btn-secondary" onclick="collapseAll()">收起全部</button>
+            <div class="filter-group">
+                <button class="filter-btn active" data-filter="all" onclick="filterIssues('all')">全部</button>
+                <button class="filter-btn" data-filter="unchecked" onclick="filterIssues('unchecked')">待处理</button>
+                <button class="filter-btn" data-filter="checked" onclick="filterIssues('checked')">已处理</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2><span class="icon">📋</span>迁移评估结论</h2>
+            <div class="conclusion-card">
+                <div class="conclusion-result">
+                    <span class="conclusion-label">迁移评估：</span>
+                    <span class="conclusion-value risk-high">⚠️ 需处理后迁移</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2><span class="icon">⚡</span>待处理内容</h2>
+            <div class="recommendations-new">
+                
+            <div class="priority-group">
+                <div class="priority-header priority-p0" onclick="togglePriority('p0')">
+                    <span class="priority-badge">P0</span>
+                    <span class="priority-count">(4 项)</span>
+                    <span class="priority-toggle-icon" id="toggle-p0">▼</span>
+                </div>
+                <ul class="priority-content expanded" id="content-p0">
+                    <li>处理所有 snippet 类注解（configuration-snippet/server-snippet/stream-snippet），开发对应的 WASM 插件或使用内置插件组合替代</li>
+<li>迁移 auth-type/auth-secret 到 basic-auth WASM 插件（Higress v2.0.0+ 推荐）</li>
+<li>评估 auth-url 等外部认证注解，配置 ext-auth WASM 插件的 forward_auth 模式</li>
+<li>调整超时配置：proxy-connect-timeout → EnvoyFilter cluster connect_timeout；proxy-read/send-timeout → higress-config upstream.idleTimeout 或 EnvoyFilter route idle_timeout</li>
+                </ul>
+            </div>
+
+            <div class="priority-group">
+                <div class="priority-header priority-p1" onclick="togglePriority('p1')">
+                    <span class="priority-badge">P1</span>
+                    <span class="priority-count">(5 项)</span>
+                    <span class="priority-toggle-icon" id="toggle-p1">▼</span>
+                </div>
+                <ul class="priority-content expanded" id="content-p1">
+                    <li>部署限流插件（key-rate-limit / cluster-key-rate-limit）替代 limit-rps/limit-rpm</li>
+<li>部署 WAF 插件替代 enable-modsecurity/enable-owasp-core-rules</li>
+<li>统一头部控制到 higress.io/request-header-control-* / response-header-control-*</li>
+<li>迁移流量镜像到 higress.io/mirror-target-service 或 mirror-target-fqdn</li>
+<li>评估部分兼容注解（load-balance/upstream-hash-by/backend-protocol 等）的实际使用值</li>
+                </ul>
+            </div>
+
+            <div class="priority-group">
+                <div class="priority-header priority-p2" onclick="togglePriority('p2')">
+                    <span class="priority-badge">P2</span>
+                    <span class="priority-count">(3 项)</span>
+                    <span class="priority-toggle-icon" id="toggle-p2">▼</span>
+                </div>
+                <ul class="priority-content expanded" id="content-p2">
+                    <li>关注 Higress 升级 Istio API 至 1.28+ 后 session-cookie-samesite/secure 的原生支持</li>
+<li>配置可观测性（tracing/logging），enable-access-log: false 需通过 EnvoyFilter metadata_filter 实现</li>
+<li>在测试环境充分验证后，再考虑生产环境迁移</li>
+                </ul>
+            </div>
+            </div>
+        </div>
+
+        
+        <div class="section" id="section-route-priority">
+            <h2><span class="icon">🔀</span>路由优先级变更警告</h2>
+            <div style="background: #fff7e6; border-left: 4px solid #faad14; padding: 15px; border-radius: 6px; margin-bottom: 20px;">
+                <p style="font-weight: 500; color: #d48806; margin-bottom: 10px;">⚠️ NGINX 和 Higress 的路由优先级规则不同，可能导致迁移后流量路由到不同后端。</p>
+                <ul style="color: #666; font-size: 14px; padding-left: 20px; margin: 0;">
+                    <li>NGINX 优先级：<code>exact &gt; regex &gt; prefix</code>（相同类型按创建时间排序）</li>
+                    <li>Higress 优先级：<code>exact &gt; prefix &gt; regex</code>（相同类型按路径长度倒序）</li>
+                </ul>
+                <p style="color: #666; font-size: 14px; margin-top: 10px;">以下 Ingress 使用了 <code>use-regex</code> 注解，且存在 regex 路径与 prefix 路径的优先级冲突：</p>
+            </div>
+            <div style="overflow-x: auto;">
+                <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                    <thead>
+                        <tr style="background: #fafbfc; border-bottom: 2px solid #e4e7ed;">
+                            <th style="padding: 10px; text-align: left; white-space: nowrap;">序号</th>
+                            <th style="padding: 10px; text-align: left;">Host</th>
+                            <th style="padding: 10px; text-align: left;">Regex 路径 (NGINX 优先)</th>
+                            <th style="padding: 10px; text-align: left;">Regex Ingress</th>
+                            <th style="padding: 10px; text-align: left;">Regex 后端</th>
+                            <th style="padding: 10px; text-align: left;">Prefix 路径 (Higress 优先)</th>
+                            <th style="padding: 10px; text-align: left;">Prefix Ingress</th>
+                            <th style="padding: 10px; text-align: left;">Prefix 后端</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        
+                <tr>
+                    <td>1</td>
+                    <td><code>high-risk.example.com</code></td>
+                    <td><code>/admin(/|$)(.*)</code></td>
+                    <td>ls-test/high-risk-app</td>
+                    <td>admin-service:8080</td>
+                    <td><code>/admin</code></td>
+                    <td>ls-test/high-risk-prefix</td>
+                    <td>admin-default-svc:80</td>
+                </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="solution-box" style="margin-top: 15px;">
+                <h4>💡 建议操作</h4>
+                <p style="color: #d48806; font-size: 13px; margin-bottom: 10px;">⚠️ 此优先级差异没有完美的自动兼容方案，需要根据实际业务逐一评估：</p>
+                <ol style="color: #666; font-size: 13px; padding-left: 20px; margin: 0;">
+                    <li><b>确认实际影响</b>：分析真实流量是否会同时命中 regex 和 prefix 路径。如果实际请求 URL 不会同时匹配两者，则优先级变化不影响路由行为</li>
+                    <li><b>将 prefix 路径也改为 regex</b>：给冲突的 prefix Ingress 加上 <code>use-regex: "true"</code>，使两者都变为 regex 类型，在 Higress 中按路径长度排序，避免优先级反转。<br/>
+                        <span style="color: #d48806;">⚠️ 注意：</span>加上 <code>use-regex</code> 后，原来的 Prefix 路径（如 <code>/admin</code>）会被当作正则表达式匹配，语义发生变化（如 <code>/some/admin</code> 也会被匹配到）。需要同时将 path 改写为等效的正则表达式以保持原有前缀匹配行为，例如将 <code>/admin</code> 改为 <code>/admin(/|$)(.*)</code></li>
+                    <li><b>缩小 prefix 路径范围</b>：将 prefix 路径改为更精确的路径（如 <code>/admin/dashboard</code> 代替 <code>/admin</code>），减少与 regex 路径的重叠</li>
+                    <li><b>合并 Ingress</b>：将冲突的 regex 和 prefix 路径合并到同一个 Ingress 中，统一后端服务，消除优先级冲突</li>
+                    <li><b>灰度验证</b>：迁移前在测试环境用真实流量回放验证路由行为，确保关键路径不受影响</li>
+                </ol>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2><span class="icon">📋</span>详细分析</h2>
+            <p style="color: #666; margin-bottom: 20px;">从注解视角和 Ingress 视角两个维度查看迁移分析结果。</p>
+
+            <div class="tab-container">
+                <div class="tab-buttons">
+                    <button class="tab-button active" onclick="switchTab('annotation')">🏷️ 注解视角</button>
+                    <button class="tab-button" onclick="switchTab('ingress')">📦 Ingress 视角</button>
+                </div>
+
+                <div id="tab-annotation" class="tab-content active">
+                    <h3><span class="icon">📊</span>注解使用统计</h3>
+                    <div class="stats-grid" style="margin-bottom: 30px;">
+                        
+                <div class="stat-item stat-clickable" onclick="scrollToSection('section-compatible')" style="cursor: pointer;">
+                    <div class="label">完全兼容</div>
+                    <div class="count">18</div>
+                </div>
+                <div class="stat-item stat-clickable" onclick="scrollToSection('section-replaceable')" style="cursor: pointer;">
+                    <div class="label">可等价替换</div>
+                    <div class="count">10</div>
+                </div>
+                <div class="stat-item stat-clickable" onclick="scrollToSection('section-incompatible')" style="cursor: pointer;">
+                    <div class="label">不兼容</div>
+                    <div class="count">5</div>
+                </div>
+                <div class="stat-item stat-clickable" onclick="scrollToSection('section-ignore')" style="cursor: pointer;">
+                    <div class="label">无需迁移</div>
+                    <div class="count">1</div>
+                </div>
+                    </div>
+
+                    <h3 style="color: #f56c6c; margin-bottom: 15px;">🚨 阻塞性问题汇总（共 5 个）</h3>
+                    <p style="color: #666; margin-bottom: 20px;">必须处理的不兼容和未知注解。</p>
+                    
+                <div class="issue-group" id="section-incompatible">
+                    <div class="issue-group-header" onclick="toggleIssueGroup('group-incompatible')">
+                        <span class="group-title">不兼容 (5 个)</span>
+                        <span class="group-icon collapsed" id="icon-group-incompatible">▼</span>
+                    </div>
+                    <div class="issue-group-content" id="content-group-incompatible">
+                    <div class="issue-item">
+                        <div class="issue-header" onclick="toggleIssue(this)">
+                            <div class="checkbox-wrapper">
+                                <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_auth-cache-duration" data-annotation="nginx.ingress.kubernetes.io/auth-cache-duration"
+                                       onclick="event.stopPropagation()">
+                            </div>
+                            <div class="issue-title">
+                                <span class="badge badge-danger">不兼容</span>
+                                <span class="annotation-name">
+                                    <span class="anno-text">nginx.ingress.kubernetes.io/auth-cache-duration</span>
+                                    <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/auth-cache-duration')" title="复制注解名称">📋</span>
+                                </span>
+                                <span class="ingress-count">影响 1 个 Ingress</span>
+                            </div>
+                            <span class="expand-icon">▼</span>
+                        </div>
+                        <div class="issue-content">
+                            <div class="info-row">
+                                <div class="info-label">📦 分类</div>
+                                <div class="info-value">认证与授权</div>
+                            </div>
+                            <div class="info-row">
+                                <div class="info-label">⭐ 优先级</div>
+                                <div class="info-value">不重要且不常用</div>
+                            </div>
+                            
+                    <div class="info-row">
+                        <div class="info-label">⚠️ 风险说明</div>
+                        <div class="info-value">中风险，可能影响认证服务性能</div>
+                    </div>
+                            <div class="info-row">
+                                <div class="info-label">🎯 影响范围</div>
+                                <div class="info-value">
+                                    <div class="ingress-list"><span class="ingress-tag">ls-test/high-risk-app</span></div>
+                                </div>
+                            </div>
+                            
+                    <div class="solution-box">
+                        <h4>💡 解决方案</h4>
+                        <p>ext-auth 插件不支持认证缓存功能，每次请求均实时调用外部认证服务</p>
+                    </div>
+                            <div class="action-box">
+                                <h4>📝 处理方式说明</h4>
+                                <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_auth-cache-duration"
+                                          placeholder="请输入具体的处理方式、负责人、预计完成时间等..."
+                                          rows="3"></textarea>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="issue-item">
+                        <div class="issue-header" onclick="toggleIssue(this)">
+                            <div class="checkbox-wrapper">
+                                <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_configuration-snippet" data-annotation="nginx.ingress.kubernetes.io/configuration-snippet"
+                                       onclick="event.stopPropagation()">
+                            </div>
+                            <div class="issue-title">
+                                <span class="badge badge-danger">不兼容</span>
+                                <span class="annotation-name">
+                                    <span class="anno-text">nginx.ingress.kubernetes.io/configuration-snippet</span>
+                                    <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/configuration-snippet')" title="复制注解名称">📋</span>
+                                </span>
+                                <span class="ingress-count">影响 1 个 Ingress</span>
+                            </div>
+                            <span class="expand-icon">▼</span>
+                        </div>
+                        <div class="issue-content">
+                            <div class="info-row">
+                                <div class="info-label">📦 分类</div>
+                                <div class="info-value">Snippet配置</div>
+                            </div>
+                            <div class="info-row">
+                                <div class="info-label">⭐ 优先级</div>
+                                <div class="info-value">重要且常用</div>
+                            </div>
+                            
+                    <div class="info-row">
+                        <div class="info-label">⚠️ 风险说明</div>
+                        <div class="info-value">高风险，必须重构自定义配置逻辑，使用频率高</div>
+                    </div>
+                            <div class="info-row">
+                                <div class="info-label">🎯 影响范围</div>
+                                <div class="info-value">
+                                    <div class="ingress-list"><span class="ingress-tag">ls-test/high-risk-app</span></div>
+                                </div>
+                            </div>
+                            
+                    <div class="solution-box">
+                        <h4>💡 解决方案</h4>
+                        <p>安全风险，Higress 不支持 snippet。需逐个分析 snippet 内容，通过 WASM 插件或内置插件组合替代</p>
+                    </div>
+                            <div class="action-box">
+                                <h4>📝 处理方式说明</h4>
+                                <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_configuration-snippet"
+                                          placeholder="请输入具体的处理方式、负责人、预计完成时间等..."
+                                          rows="3"></textarea>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="issue-item">
+                        <div class="issue-header" onclick="toggleIssue(this)">
+                            <div class="checkbox-wrapper">
+                                <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_mirror-host" data-annotation="nginx.ingress.kubernetes.io/mirror-host"
+                                       onclick="event.stopPropagation()">
+                            </div>
+                            <div class="issue-title">
+                                <span class="badge badge-danger">不兼容</span>
+                                <span class="annotation-name">
+                                    <span class="anno-text">nginx.ingress.kubernetes.io/mirror-host</span>
+                                    <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/mirror-host')" title="复制注解名称">📋</span>
+                                </span>
+                                <span class="ingress-count">影响 1 个 Ingress</span>
+                            </div>
+                            <span class="expand-icon">▼</span>
+                        </div>
+                        <div class="issue-content">
+                            <div class="info-row">
+                                <div class="info-label">📦 分类</div>
+                                <div class="info-value">流量镜像</div>
+                            </div>
+                            <div class="info-row">
+                                <div class="info-label">⭐ 优先级</div>
+                                <div class="info-value">不重要但常用</div>
+                            </div>
+                            
+                    <div class="info-row">
+                        <div class="info-label">⚠️ 风险说明</div>
+                        <div class="info-value">中风险，需通过 EnvoyFilter 或 WASM 插件实现</div>
+                    </div>
+                            <div class="info-row">
+                                <div class="info-label">🎯 影响范围</div>
+                                <div class="info-value">
+                                    <div class="ingress-list"><span class="ingress-tag">ls-test/to-verify-app</span></div>
+                                </div>
+                            </div>
+                            
+                    <div class="solution-box">
+                        <h4>💡 解决方案</h4>
+                        <p>Envoy route mirror 配置没有独立设置镜像请求 Host 的字段</p>
+                    </div>
+                            <div class="action-box">
+                                <h4>📝 处理方式说明</h4>
+                                <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_mirror-host"
+                                          placeholder="请输入具体的处理方式、负责人、预计完成时间等..."
+                                          rows="3"></textarea>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="issue-item">
+                        <div class="issue-header" onclick="toggleIssue(this)">
+                            <div class="checkbox-wrapper">
+                                <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_session-cookie-samesite" data-annotation="nginx.ingress.kubernetes.io/session-cookie-samesite"
+                                       onclick="event.stopPropagation()">
+                            </div>
+                            <div class="issue-title">
+                                <span class="badge badge-danger">不兼容</span>
+                                <span class="annotation-name">
+                                    <span class="anno-text">nginx.ingress.kubernetes.io/session-cookie-samesite</span>
+                                    <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/session-cookie-samesite')" title="复制注解名称">📋</span>
+                                </span>
+                                <span class="ingress-count">影响 1 个 Ingress</span>
+                            </div>
+                            <span class="expand-icon">▼</span>
+                        </div>
+                        <div class="issue-content">
+                            <div class="info-row">
+                                <div class="info-label">📦 分类</div>
+                                <div class="info-value">负载均衡</div>
+                            </div>
+                            <div class="info-row">
+                                <div class="info-label">⭐ 优先级</div>
+                                <div class="info-value">重要且常用</div>
+                            </div>
+                            
+                    <div class="info-row">
+                        <div class="info-label">⚠️ 风险说明</div>
+                        <div class="info-value">高风险，CSRF 防护必需配置</div>
+                    </div>
+                            <div class="info-row">
+                                <div class="info-label">🎯 影响范围</div>
+                                <div class="info-value">
+                                    <div class="ingress-list"><span class="ingress-tag">ls-test/to-verify-app</span></div>
+                                </div>
+                            </div>
+                            
+                    <div class="solution-box">
+                        <h4>💡 解决方案</h4>
+                        <p>Istio 1.28 已新增 SameSite 支持，待 Higress 升级 Istio API 后可原生支持</p>
+                    </div>
+                            <div class="action-box">
+                                <h4>📝 处理方式说明</h4>
+                                <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_session-cookie-samesite"
+                                          placeholder="请输入具体的处理方式、负责人、预计完成时间等..."
+                                          rows="3"></textarea>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="issue-item">
+                        <div class="issue-header" onclick="toggleIssue(this)">
+                            <div class="checkbox-wrapper">
+                                <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_session-cookie-secure" data-annotation="nginx.ingress.kubernetes.io/session-cookie-secure"
+                                       onclick="event.stopPropagation()">
+                            </div>
+                            <div class="issue-title">
+                                <span class="badge badge-danger">不兼容</span>
+                                <span class="annotation-name">
+                                    <span class="anno-text">nginx.ingress.kubernetes.io/session-cookie-secure</span>
+                                    <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/session-cookie-secure')" title="复制注解名称">📋</span>
+                                </span>
+                                <span class="ingress-count">影响 1 个 Ingress</span>
+                            </div>
+                            <span class="expand-icon">▼</span>
+                        </div>
+                        <div class="issue-content">
+                            <div class="info-row">
+                                <div class="info-label">📦 分类</div>
+                                <div class="info-value">负载均衡</div>
+                            </div>
+                            <div class="info-row">
+                                <div class="info-label">⭐ 优先级</div>
+                                <div class="info-value">重要且常用</div>
+                            </div>
+                            
+                    <div class="info-row">
+                        <div class="info-label">⚠️ 风险说明</div>
+                        <div class="info-value">高风险，HTTPS 安全必需配置</div>
+                    </div>
+                            <div class="info-row">
+                                <div class="info-label">🎯 影响范围</div>
+                                <div class="info-value">
+                                    <div class="ingress-list"><span class="ingress-tag">ls-test/to-verify-app</span></div>
+                                </div>
+                            </div>
+                            
+                    <div class="solution-box">
+                        <h4>💡 解决方案</h4>
+                        <p>Istio 1.28 已新增 Secure 支持，待 Higress 升级 Istio API 后可原生支持</p>
+                    </div>
+                            <div class="action-box">
+                                <h4>📝 处理方式说明</h4>
+                                <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_session-cookie-secure"
+                                          placeholder="请输入具体的处理方式、负责人、预计完成时间等..."
+                                          rows="3"></textarea>
+                            </div>
+                        </div>
+                    </div></div></div>
+
+                    <h3 style="color: #409eff; margin: 30px 0 15px 0;">📋 其他注解</h3>
+                    <p style="color: #666; margin-bottom: 20px;">部分兼容、可等价替换、完全兼容、无需迁移等注解。</p>
+                    
+            <div class="issue-group" id="section-replaceable">
+                <div class="issue-group-header" onclick="toggleIssueGroup('group-replaceable')">
+                    <span class="group-title">可等价替换 (9 个)</span>
+                    <span class="group-icon collapsed" id="icon-group-replaceable">▼</span>
+                </div>
+                <div class="issue-group-content" id="content-group-replaceable">
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_auth-secret_all" data-annotation="nginx.ingress.kubernetes.io/auth-secret"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-info">可等价替换</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/auth-secret</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/auth-secret')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">认证与授权</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">不重要但常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">中风险，需要迁移凭证管理方式</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/high-risk-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>迁移到 basic-auth WASM 插件后，用户凭证通过插件配置管理，不再依赖 K8s Secret</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_auth-secret_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_auth-type_all" data-annotation="nginx.ingress.kubernetes.io/auth-type"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-info">可等价替换</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/auth-type</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/auth-type')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">认证与授权</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">不重要但常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">中风险，需要迁移到 basic-auth 插件</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/high-risk-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>通过 basic-auth WASM 插件实现（Higress v2.0.0+ 推荐），Digest 认证需自定义 WASM 插件</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_auth-type_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_limit-rps_all" data-annotation="nginx.ingress.kubernetes.io/limit-rps"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-info">可等价替换</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/limit-rps</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/limit-rps')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 2 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">限流与限速</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要且常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">中风险，需要部署限流插件</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/medium-risk-app</span><span class="ingress-tag">ls-test/secure-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>使用 Higress key-rate-limit 插件，配置 limit_by_per_ip</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_limit-rps_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_proxy-read-timeout_all" data-annotation="nginx.ingress.kubernetes.io/proxy-read-timeout"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-info">可等价替换</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/proxy-read-timeout</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/proxy-read-timeout')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">后端服务配置</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要且常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">高风险，仅支持全局配置或需 EnvoyFilter 实现路由级配置</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/medium-risk-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>全局：higress-config upstream.idleTimeout；路由级：EnvoyFilter route idle_timeout</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_proxy-read-timeout_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_x-forwarded-prefix_all" data-annotation="nginx.ingress.kubernetes.io/x-forwarded-prefix"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-info">可等价替换</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/x-forwarded-prefix</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/x-forwarded-prefix')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">路由与重写</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">不重要但常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">低风险，需要添加请求头控制注解</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/medium-risk-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>通过 higress.io/request-header-control-add 实现</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_x-forwarded-prefix_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_enable-modsecurity_all" data-annotation="nginx.ingress.kubernetes.io/enable-modsecurity"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-info">可等价替换</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/enable-modsecurity</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/enable-modsecurity')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">安全防护</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要且常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">中风险，需要部署 WAF 插件</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/secure-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>使用 Higress waf WASM 插件（基于 Coraza 引擎），配置 useCRS: true</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_enable-modsecurity_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_enable-owasp-core-rules_all" data-annotation="nginx.ingress.kubernetes.io/enable-owasp-core-rules"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-info">可等价替换</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/enable-owasp-core-rules</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/enable-owasp-core-rules')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">安全防护</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要且常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">中风险，需要部署 WAF 插件</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/secure-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>使用 Higress waf 插件，配置 useCRS: true 启用内嵌 OWASP CRS 规则集</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_enable-owasp-core-rules_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_limit-connections_all" data-annotation="nginx.ingress.kubernetes.io/limit-connections"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-info">可等价替换</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/limit-connections</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/limit-connections')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">限流与限速</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要但不常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">中风险，需要创建 EnvoyFilter 或 DestinationRule</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/secure-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>推荐通过 EnvoyFilter connection_limit 限制下游并发连接数，或 DestinationRule maxConnections</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_limit-connections_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_mirror-target_all" data-annotation="nginx.ingress.kubernetes.io/mirror-target"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-info">可等价替换</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/mirror-target</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/mirror-target')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">流量镜像</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要但不常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">低风险，注解名称和参数格式不同但功能完全可达</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/to-verify-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>使用 higress.io/mirror-target-service 或 mirror-target-fqdn，配合 mirror-percentage</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_mirror-target_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div></div></div>
+            <div class="issue-group" id="section-compatible">
+                <div class="issue-group-header" onclick="toggleIssueGroup('group-compatible')">
+                    <span class="group-title">完全兼容 (14 个)</span>
+                    <span class="group-icon collapsed" id="icon-group-compatible">▼</span>
+                </div>
+                <div class="issue-group-content" id="content-group-compatible">
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_canary_all" data-annotation="nginx.ingress.kubernetes.io/canary"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">完全兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/canary</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/canary')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">灰度发布</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要且常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">无风险</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/canary-app-canary</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>直接使用原注解或 higress.io/canary</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_canary_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_canary-by-header_all" data-annotation="nginx.ingress.kubernetes.io/canary-by-header"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">完全兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/canary-by-header</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/canary-by-header')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">灰度发布</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要且常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">无风险</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/canary-app-canary</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>直接使用原注解或 higress.io/canary-by-header</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_canary-by-header_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_canary-by-header-value_all" data-annotation="nginx.ingress.kubernetes.io/canary-by-header-value"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">完全兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/canary-by-header-value</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/canary-by-header-value')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">灰度发布</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要且常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">无风险</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/canary-app-canary</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>直接使用原注解或 higress.io/canary-by-header-value</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_canary-by-header-value_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_canary-weight_all" data-annotation="nginx.ingress.kubernetes.io/canary-weight"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">完全兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/canary-weight</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/canary-weight')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">灰度发布</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要且常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">无风险</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/canary-app-canary</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>直接使用原注解或 higress.io/canary-weight</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_canary-weight_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_rewrite-target_all" data-annotation="nginx.ingress.kubernetes.io/rewrite-target"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">完全兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/rewrite-target</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/rewrite-target')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 2 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">路由与重写</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要且常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">无风险</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/high-risk-app</span><span class="ingress-tag">ls-test/low-risk-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>直接使用原注解或 higress.io/rewrite-target</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_rewrite-target_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_use-regex_all" data-annotation="nginx.ingress.kubernetes.io/use-regex"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">完全兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/use-regex</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/use-regex')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 2 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">路由与重写</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要且常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">中风险，路由优先级差异可能导致流量路由到不同后端</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/high-risk-app</span><span class="ingress-tag">ls-test/low-risk-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>直接使用原注解或 higress.io/use-regex。⚠️ 路由优先级差异：NGINX 中 regex > prefix，Higress 中 prefix > regex，需检查是否存在 regex 路径与 prefix 路径的优先级冲突</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_use-regex_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_cors-allow-methods_all" data-annotation="nginx.ingress.kubernetes.io/cors-allow-methods"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">完全兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/cors-allow-methods</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/cors-allow-methods')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">CORS</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要且常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">无风险</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/low-risk-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>直接使用原注解或 higress.io/cors-allow-methods</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_cors-allow-methods_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_cors-allow-origin_all" data-annotation="nginx.ingress.kubernetes.io/cors-allow-origin"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">完全兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/cors-allow-origin</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/cors-allow-origin')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">CORS</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要且常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">无风险</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/low-risk-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>直接使用原注解或 higress.io/cors-allow-origin</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_cors-allow-origin_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_enable-cors_all" data-annotation="nginx.ingress.kubernetes.io/enable-cors"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">完全兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/enable-cors</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/enable-cors')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 2 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">CORS</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要且常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">无风险</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/low-risk-app</span><span class="ingress-tag">ls-test/medium-risk-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>直接使用原注解或 higress.io/enable-cors</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_enable-cors_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_ssl-redirect_all" data-annotation="nginx.ingress.kubernetes.io/ssl-redirect"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">完全兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/ssl-redirect</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/ssl-redirect')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">重定向</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要且常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">无风险</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/low-risk-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>直接使用原注解或 higress.io/ssl-redirect</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_ssl-redirect_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_whitelist-source-range_all" data-annotation="nginx.ingress.kubernetes.io/whitelist-source-range"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">完全兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/whitelist-source-range</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/whitelist-source-range')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 2 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">访问控制</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要且常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">无风险</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/low-risk-app</span><span class="ingress-tag">ls-test/secure-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>直接使用原注解或 higress.io/whitelist-source-range</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_whitelist-source-range_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_affinity_all" data-annotation="nginx.ingress.kubernetes.io/affinity"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">完全兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/affinity</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/affinity')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">负载均衡</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要且常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">无风险</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/to-verify-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>直接使用原注解或 higress.io/affinity</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_affinity_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_session-cookie-max-age_all" data-annotation="nginx.ingress.kubernetes.io/session-cookie-max-age"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">完全兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/session-cookie-max-age</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/session-cookie-max-age')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">负载均衡</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">不重要但常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">无风险</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/to-verify-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>已在 loadbalance.go 验证</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_session-cookie-max-age_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_session-cookie-name_all" data-annotation="nginx.ingress.kubernetes.io/session-cookie-name"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">完全兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/session-cookie-name</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/session-cookie-name')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">负载均衡</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">不重要但常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">无风险</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">ls-test/to-verify-app</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>已在 loadbalance.go 验证</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_session-cookie-name_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div></div></div>
+            <div class="issue-group" id="section-ignore">
+                <div class="issue-group-header" onclick="toggleIssueGroup('group-ignore')">
+                    <span class="group-title">无需迁移 (1 个)</span>
+                    <span class="group-icon collapsed" id="icon-group-ignore">▼</span>
+                </div>
+                <div class="issue-group-content" id="content-group-ignore">
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIssue(this)">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-issue-id="nginx_ingress_kubernetes_io_proxy-body-size_all" data-annotation="nginx.ingress.kubernetes.io/proxy-body-size"
+                                   onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-info">无需迁移</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">nginx.ingress.kubernetes.io/proxy-body-size</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'nginx.ingress.kubernetes.io/proxy-body-size')" title="复制注解名称">📋</span>
+                            </span>
+                            <span class="ingress-count">影响 1 个 Ingress</span>
+                        </div>
+                        <span class="expand-icon">▼</span>
+                    </div>
+                    <div class="issue-content">
+                        <div class="info-row"><div class="info-label">📦 分类</div><div class="info-value">后端服务配置</div></div>
+                        <div class="info-row"><div class="info-label">⭐ 优先级</div><div class="info-value">重要且常用</div></div>
+                        
+                <div class="info-row">
+                    <div class="info-label">⚠️ 风险说明</div>
+                    <div class="info-value">无风险，直接忽略</div>
+                </div>
+                        <div class="info-row">
+                            <div class="info-label">🎯 影响范围</div>
+                            <div class="info-value"><div class="ingress-list"><span class="ingress-tag">hiway/hiway-web</span></div></div>
+                        </div>
+                        
+                <div class="solution-box">
+                    <h4>💡 解决方案</h4>
+                    <p>迁移时可安全忽略。NGINX 需要此限制是因为「先收完请求体再转发」架构会导致内存/磁盘爆炸；Envoy 流式转发架构下单连接内存上界仅为 per_connection_buffer_limit_bytes（默认 32KB），不会因请求体过大打爆网关。极少数需在网关层拦截超大请求的场景可通过 WasmPlugin 实现</p>
+                </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-issue-id="nginx_ingress_kubernetes_io_proxy-body-size_all"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div></div></div>
+                </div>
+
+                <div id="tab-ingress" class="tab-content">
+                    <h3 style="color: #409eff; margin-bottom: 15px;">按兼容性分类展示所有 Ingress（共 11 个）</h3>
+                    
+            <div class="ingress-category" style="margin-bottom: 25px;">
+                <div style="background: #fef0f0; padding: 15px; border-left: 4px solid #f56c6c; border-radius: 6px; margin-bottom: 15px;">
+                    <h4 style="margin: 0; color: #f56c6c; font-size: 16px;">
+                        🔴 需改造-高风险 (2 个)
+                    </h4>
+                    <p style="margin: 5px 0 0 0; font-size: 13px; color: #666;">有不兼容或未知注解，需重点处理</p>
+                </div>
+                <div class="ingress-items">
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIngress('ls_test_high_risk_app')">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-ingress-id="ls_test_high_risk_app" onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-danger">高风险</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">ls-test/high-risk-app</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'ls-test/high-risk-app')" title="复制">📋</span>
+                            </span>
+                            <span class="ingress-count">完全兼容: 2 | 可等价替换: 2 | 不兼容: 2</span>
+                        </div>
+                        <span class="expand-icon" id="icon-ls_test_high_risk_app">▼</span>
+                    </div>
+                    <div class="issue-content" id="content-ls_test_high_risk_app">
+                        <div class="info-row"><div class="info-label">📦 命名空间</div><div class="info-value">ls-test</div></div>
+                        <div class="info-row"><div class="info-label">📝 名称</div><div class="info-value">high-risk-app</div></div>
+                        <div class="info-row"><div class="info-label">⚠️ 风险等级</div><div class="info-value">🔴 高风险</div></div>
+                        
+                    <div style="margin-top: 10px;">
+                        <div style="font-size: 13px; font-weight: 500; color: #666; margin-bottom: 5px;">需处理的注解:</div>
+                        
+                        <div style="margin: 5px 0; padding: 8px; background: #fafbfc; border-left: 3px solid #f56c6c; border-radius: 3px;">
+                            <div style="font-weight: 500; color: #f56c6c;">
+                                <span class="badge badge-danger" style="margin-right: 5px;">不兼容</span>
+                                <code style="font-size: 12px;">nginx.ingress.kubernetes.io/auth-cache-duration</code>
+                            </div>
+                            <div style="font-size: 12px; color: #666; margin-top: 5px;">解决方案: ext-auth 插件不支持认证缓存功能，每次请求均实时调用外部认证服务</div>
+                        </div>
+                        <div style="margin: 5px 0; padding: 8px; background: #fafbfc; border-left: 3px solid #f56c6c; border-radius: 3px;">
+                            <div style="font-weight: 500; color: #f56c6c;">
+                                <span class="badge badge-danger" style="margin-right: 5px;">不兼容</span>
+                                <code style="font-size: 12px;">nginx.ingress.kubernetes.io/configuration-snippet</code>
+                            </div>
+                            <div style="font-size: 12px; color: #666; margin-top: 5px;">解决方案: 安全风险，Higress 不支持 snippet。需逐个分析 snippet 内容，通过 WASM 插件或内置插件组合替代</div>
+                        </div>
+                    </div>
+                        
+                    <div style="margin-top: 10px;">
+                        <div style="font-size: 13px; font-weight: 500; color: #666; margin-bottom: 5px;">需关注的注解（可等价替换/部分兼容）:</div>
+                        
+                        <div style="margin: 5px 0; padding: 8px; background: #fafbfc; border-left: 3px solid #409eff; border-radius: 3px;">
+                            <div style="font-weight: 500; color: #409eff;">
+                                <span class="badge badge-info" style="margin-right: 5px;">可等价替换</span>
+                                <code style="font-size: 12px;">nginx.ingress.kubernetes.io/auth-secret</code>
+                            </div>
+                            <div style="font-size: 12px; color: #666; margin-top: 5px;">解决方案: 迁移到 basic-auth WASM 插件后，用户凭证通过插件配置管理，不再依赖 K8s Secret</div>
+                        </div>
+                        <div style="margin: 5px 0; padding: 8px; background: #fafbfc; border-left: 3px solid #409eff; border-radius: 3px;">
+                            <div style="font-weight: 500; color: #409eff;">
+                                <span class="badge badge-info" style="margin-right: 5px;">可等价替换</span>
+                                <code style="font-size: 12px;">nginx.ingress.kubernetes.io/auth-type</code>
+                            </div>
+                            <div style="font-size: 12px; color: #666; margin-top: 5px;">解决方案: 通过 basic-auth WASM 插件实现（Higress v2.0.0+ 推荐），Digest 认证需自定义 WASM 插件</div>
+                        </div>
+                    </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-ingress-id="ls_test_high_risk_app"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIngress('ls_test_to_verify_app')">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-ingress-id="ls_test_to_verify_app" onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-danger">高风险</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">ls-test/to-verify-app</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'ls-test/to-verify-app')" title="复制">📋</span>
+                            </span>
+                            <span class="ingress-count">完全兼容: 3 | 可等价替换: 1 | 不兼容: 3</span>
+                        </div>
+                        <span class="expand-icon" id="icon-ls_test_to_verify_app">▼</span>
+                    </div>
+                    <div class="issue-content" id="content-ls_test_to_verify_app">
+                        <div class="info-row"><div class="info-label">📦 命名空间</div><div class="info-value">ls-test</div></div>
+                        <div class="info-row"><div class="info-label">📝 名称</div><div class="info-value">to-verify-app</div></div>
+                        <div class="info-row"><div class="info-label">⚠️ 风险等级</div><div class="info-value">🔴 高风险</div></div>
+                        
+                    <div style="margin-top: 10px;">
+                        <div style="font-size: 13px; font-weight: 500; color: #666; margin-bottom: 5px;">需处理的注解:</div>
+                        
+                        <div style="margin: 5px 0; padding: 8px; background: #fafbfc; border-left: 3px solid #f56c6c; border-radius: 3px;">
+                            <div style="font-weight: 500; color: #f56c6c;">
+                                <span class="badge badge-danger" style="margin-right: 5px;">不兼容</span>
+                                <code style="font-size: 12px;">nginx.ingress.kubernetes.io/mirror-host</code>
+                            </div>
+                            <div style="font-size: 12px; color: #666; margin-top: 5px;">解决方案: Envoy route mirror 配置没有独立设置镜像请求 Host 的字段</div>
+                        </div>
+                        <div style="margin: 5px 0; padding: 8px; background: #fafbfc; border-left: 3px solid #f56c6c; border-radius: 3px;">
+                            <div style="font-weight: 500; color: #f56c6c;">
+                                <span class="badge badge-danger" style="margin-right: 5px;">不兼容</span>
+                                <code style="font-size: 12px;">nginx.ingress.kubernetes.io/session-cookie-samesite</code>
+                            </div>
+                            <div style="font-size: 12px; color: #666; margin-top: 5px;">解决方案: Istio 1.28 已新增 SameSite 支持，待 Higress 升级 Istio API 后可原生支持</div>
+                        </div>
+                        <div style="margin: 5px 0; padding: 8px; background: #fafbfc; border-left: 3px solid #f56c6c; border-radius: 3px;">
+                            <div style="font-weight: 500; color: #f56c6c;">
+                                <span class="badge badge-danger" style="margin-right: 5px;">不兼容</span>
+                                <code style="font-size: 12px;">nginx.ingress.kubernetes.io/session-cookie-secure</code>
+                            </div>
+                            <div style="font-size: 12px; color: #666; margin-top: 5px;">解决方案: Istio 1.28 已新增 Secure 支持，待 Higress 升级 Istio API 后可原生支持</div>
+                        </div>
+                    </div>
+                        
+                    <div style="margin-top: 10px;">
+                        <div style="font-size: 13px; font-weight: 500; color: #666; margin-bottom: 5px;">需关注的注解（可等价替换/部分兼容）:</div>
+                        
+                        <div style="margin: 5px 0; padding: 8px; background: #fafbfc; border-left: 3px solid #409eff; border-radius: 3px;">
+                            <div style="font-weight: 500; color: #409eff;">
+                                <span class="badge badge-info" style="margin-right: 5px;">可等价替换</span>
+                                <code style="font-size: 12px;">nginx.ingress.kubernetes.io/mirror-target</code>
+                            </div>
+                            <div style="font-size: 12px; color: #666; margin-top: 5px;">解决方案: 使用 higress.io/mirror-target-service 或 mirror-target-fqdn，配合 mirror-percentage</div>
+                        </div>
+                    </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-ingress-id="ls_test_to_verify_app"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div></div></div>
+            <div class="ingress-category" style="margin-bottom: 25px;">
+                <div style="background: #fdf6ec; padding: 15px; border-left: 4px solid #e6a23c; border-radius: 6px; margin-bottom: 15px;">
+                    <h4 style="margin: 0; color: #e6a23c; font-size: 16px;">
+                        🟡 需改造-中风险 (2 个)
+                    </h4>
+                    <p style="margin: 5px 0 0 0; font-size: 13px; color: #666;">有部分兼容或可等价替换的注解，需要改造</p>
+                </div>
+                <div class="ingress-items">
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIngress('ls_test_medium_risk_app')">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-ingress-id="ls_test_medium_risk_app" onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-warning">中风险</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">ls-test/medium-risk-app</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'ls-test/medium-risk-app')" title="复制">📋</span>
+                            </span>
+                            <span class="ingress-count">完全兼容: 1 | 可等价替换: 3</span>
+                        </div>
+                        <span class="expand-icon" id="icon-ls_test_medium_risk_app">▼</span>
+                    </div>
+                    <div class="issue-content" id="content-ls_test_medium_risk_app">
+                        <div class="info-row"><div class="info-label">📦 命名空间</div><div class="info-value">ls-test</div></div>
+                        <div class="info-row"><div class="info-label">📝 名称</div><div class="info-value">medium-risk-app</div></div>
+                        <div class="info-row"><div class="info-label">⚠️ 风险等级</div><div class="info-value">🟡 中风险</div></div>
+                        
+                        
+                    <div style="margin-top: 10px;">
+                        <div style="font-size: 13px; font-weight: 500; color: #666; margin-bottom: 5px;">需关注的注解（可等价替换/部分兼容）:</div>
+                        
+                        <div style="margin: 5px 0; padding: 8px; background: #fafbfc; border-left: 3px solid #409eff; border-radius: 3px;">
+                            <div style="font-weight: 500; color: #409eff;">
+                                <span class="badge badge-info" style="margin-right: 5px;">可等价替换</span>
+                                <code style="font-size: 12px;">nginx.ingress.kubernetes.io/limit-rps</code>
+                            </div>
+                            <div style="font-size: 12px; color: #666; margin-top: 5px;">解决方案: 使用 Higress key-rate-limit 插件，配置 limit_by_per_ip</div>
+                        </div>
+                        <div style="margin: 5px 0; padding: 8px; background: #fafbfc; border-left: 3px solid #409eff; border-radius: 3px;">
+                            <div style="font-weight: 500; color: #409eff;">
+                                <span class="badge badge-info" style="margin-right: 5px;">可等价替换</span>
+                                <code style="font-size: 12px;">nginx.ingress.kubernetes.io/proxy-read-timeout</code>
+                            </div>
+                            <div style="font-size: 12px; color: #666; margin-top: 5px;">解决方案: 全局：higress-config upstream.idleTimeout；路由级：EnvoyFilter route idle_timeout</div>
+                        </div>
+                        <div style="margin: 5px 0; padding: 8px; background: #fafbfc; border-left: 3px solid #409eff; border-radius: 3px;">
+                            <div style="font-weight: 500; color: #409eff;">
+                                <span class="badge badge-info" style="margin-right: 5px;">可等价替换</span>
+                                <code style="font-size: 12px;">nginx.ingress.kubernetes.io/x-forwarded-prefix</code>
+                            </div>
+                            <div style="font-size: 12px; color: #666; margin-top: 5px;">解决方案: 通过 higress.io/request-header-control-add 实现</div>
+                        </div>
+                    </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-ingress-id="ls_test_medium_risk_app"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIngress('ls_test_secure_app')">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-ingress-id="ls_test_secure_app" onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-warning">中风险</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">ls-test/secure-app</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'ls-test/secure-app')" title="复制">📋</span>
+                            </span>
+                            <span class="ingress-count">完全兼容: 1 | 可等价替换: 4</span>
+                        </div>
+                        <span class="expand-icon" id="icon-ls_test_secure_app">▼</span>
+                    </div>
+                    <div class="issue-content" id="content-ls_test_secure_app">
+                        <div class="info-row"><div class="info-label">📦 命名空间</div><div class="info-value">ls-test</div></div>
+                        <div class="info-row"><div class="info-label">📝 名称</div><div class="info-value">secure-app</div></div>
+                        <div class="info-row"><div class="info-label">⚠️ 风险等级</div><div class="info-value">🟡 中风险</div></div>
+                        
+                        
+                    <div style="margin-top: 10px;">
+                        <div style="font-size: 13px; font-weight: 500; color: #666; margin-bottom: 5px;">需关注的注解（可等价替换/部分兼容）:</div>
+                        
+                        <div style="margin: 5px 0; padding: 8px; background: #fafbfc; border-left: 3px solid #409eff; border-radius: 3px;">
+                            <div style="font-weight: 500; color: #409eff;">
+                                <span class="badge badge-info" style="margin-right: 5px;">可等价替换</span>
+                                <code style="font-size: 12px;">nginx.ingress.kubernetes.io/enable-modsecurity</code>
+                            </div>
+                            <div style="font-size: 12px; color: #666; margin-top: 5px;">解决方案: 使用 Higress waf WASM 插件（基于 Coraza 引擎），配置 useCRS: true</div>
+                        </div>
+                        <div style="margin: 5px 0; padding: 8px; background: #fafbfc; border-left: 3px solid #409eff; border-radius: 3px;">
+                            <div style="font-weight: 500; color: #409eff;">
+                                <span class="badge badge-info" style="margin-right: 5px;">可等价替换</span>
+                                <code style="font-size: 12px;">nginx.ingress.kubernetes.io/enable-owasp-core-rules</code>
+                            </div>
+                            <div style="font-size: 12px; color: #666; margin-top: 5px;">解决方案: 使用 Higress waf 插件，配置 useCRS: true 启用内嵌 OWASP CRS 规则集</div>
+                        </div>
+                        <div style="margin: 5px 0; padding: 8px; background: #fafbfc; border-left: 3px solid #409eff; border-radius: 3px;">
+                            <div style="font-weight: 500; color: #409eff;">
+                                <span class="badge badge-info" style="margin-right: 5px;">可等价替换</span>
+                                <code style="font-size: 12px;">nginx.ingress.kubernetes.io/limit-connections</code>
+                            </div>
+                            <div style="font-size: 12px; color: #666; margin-top: 5px;">解决方案: 推荐通过 EnvoyFilter connection_limit 限制下游并发连接数，或 DestinationRule maxConnections</div>
+                        </div>
+                        <div style="margin: 5px 0; padding: 8px; background: #fafbfc; border-left: 3px solid #409eff; border-radius: 3px;">
+                            <div style="font-weight: 500; color: #409eff;">
+                                <span class="badge badge-info" style="margin-right: 5px;">可等价替换</span>
+                                <code style="font-size: 12px;">nginx.ingress.kubernetes.io/limit-rps</code>
+                            </div>
+                            <div style="font-size: 12px; color: #666; margin-top: 5px;">解决方案: 使用 Higress key-rate-limit 插件，配置 limit_by_per_ip</div>
+                        </div>
+                    </div>
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-ingress-id="ls_test_secure_app"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div></div></div>
+            <div class="ingress-category" style="margin-bottom: 25px;">
+                <div style="background: #f0f9ff; padding: 15px; border-left: 4px solid #67c23a; border-radius: 6px; margin-bottom: 15px;">
+                    <h4 style="margin: 0; color: #67c23a; font-size: 16px;">
+                        ✅ 完美兼容 (7 个)
+                    </h4>
+                    <p style="margin: 5px 0 0 0; font-size: 13px; color: #666;">所有注解都完全兼容或无需迁移，可直接迁移</p>
+                </div>
+                <div class="ingress-items">
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIngress('hiway_hiway_web')">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-ingress-id="hiway_hiway_web" onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">hiway/hiway-web</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'hiway/hiway-web')" title="复制">📋</span>
+                            </span>
+                            <span class="ingress-count">无需迁移: 1</span>
+                        </div>
+                        <span class="expand-icon" id="icon-hiway_hiway_web">▼</span>
+                    </div>
+                    <div class="issue-content" id="content-hiway_hiway_web">
+                        <div class="info-row"><div class="info-label">📦 命名空间</div><div class="info-value">hiway</div></div>
+                        <div class="info-row"><div class="info-label">📝 名称</div><div class="info-value">hiway-web</div></div>
+                        <div class="info-row"><div class="info-label">⚠️ 风险等级</div><div class="info-value">✅ 兼容</div></div>
+                        
+                        
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-ingress-id="hiway_hiway_web"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIngress('ls_test_canary_app_canary')">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-ingress-id="ls_test_canary_app_canary" onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">ls-test/canary-app-canary</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'ls-test/canary-app-canary')" title="复制">📋</span>
+                            </span>
+                            <span class="ingress-count">完全兼容: 4</span>
+                        </div>
+                        <span class="expand-icon" id="icon-ls_test_canary_app_canary">▼</span>
+                    </div>
+                    <div class="issue-content" id="content-ls_test_canary_app_canary">
+                        <div class="info-row"><div class="info-label">📦 命名空间</div><div class="info-value">ls-test</div></div>
+                        <div class="info-row"><div class="info-label">📝 名称</div><div class="info-value">canary-app-canary</div></div>
+                        <div class="info-row"><div class="info-label">⚠️ 风险等级</div><div class="info-value">✅ 兼容</div></div>
+                        
+                        
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-ingress-id="ls_test_canary_app_canary"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIngress('ls_test_canary_app_production')">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-ingress-id="ls_test_canary_app_production" onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">ls-test/canary-app-production</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'ls-test/canary-app-production')" title="复制">📋</span>
+                            </span>
+                            <span class="ingress-count">无注解</span>
+                        </div>
+                        <span class="expand-icon" id="icon-ls_test_canary_app_production">▼</span>
+                    </div>
+                    <div class="issue-content" id="content-ls_test_canary_app_production">
+                        <div class="info-row"><div class="info-label">📦 命名空间</div><div class="info-value">ls-test</div></div>
+                        <div class="info-row"><div class="info-label">📝 名称</div><div class="info-value">canary-app-production</div></div>
+                        <div class="info-row"><div class="info-label">⚠️ 风险等级</div><div class="info-value">✅ 兼容</div></div>
+                        
+                        
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-ingress-id="ls_test_canary_app_production"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIngress('ls_test_high_risk_prefix')">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-ingress-id="ls_test_high_risk_prefix" onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">ls-test/high-risk-prefix</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'ls-test/high-risk-prefix')" title="复制">📋</span>
+                            </span>
+                            <span class="ingress-count">无注解</span>
+                        </div>
+                        <span class="expand-icon" id="icon-ls_test_high_risk_prefix">▼</span>
+                    </div>
+                    <div class="issue-content" id="content-ls_test_high_risk_prefix">
+                        <div class="info-row"><div class="info-label">📦 命名空间</div><div class="info-value">ls-test</div></div>
+                        <div class="info-row"><div class="info-label">📝 名称</div><div class="info-value">high-risk-prefix</div></div>
+                        <div class="info-row"><div class="info-label">⚠️ 风险等级</div><div class="info-value">✅ 兼容</div></div>
+                        
+                        
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-ingress-id="ls_test_high_risk_prefix"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIngress('ls_test_low_risk_app')">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-ingress-id="ls_test_low_risk_app" onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">ls-test/low-risk-app</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'ls-test/low-risk-app')" title="复制">📋</span>
+                            </span>
+                            <span class="ingress-count">完全兼容: 7</span>
+                        </div>
+                        <span class="expand-icon" id="icon-ls_test_low_risk_app">▼</span>
+                    </div>
+                    <div class="issue-content" id="content-ls_test_low_risk_app">
+                        <div class="info-row"><div class="info-label">📦 命名空间</div><div class="info-value">ls-test</div></div>
+                        <div class="info-row"><div class="info-label">📝 名称</div><div class="info-value">low-risk-app</div></div>
+                        <div class="info-row"><div class="info-label">⚠️ 风险等级</div><div class="info-value">✅ 兼容</div></div>
+                        
+                        
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-ingress-id="ls_test_low_risk_app"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIngress('ls_test_ls_test')">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-ingress-id="ls_test_ls_test" onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">ls-test/ls-test</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'ls-test/ls-test')" title="复制">📋</span>
+                            </span>
+                            <span class="ingress-count">无注解</span>
+                        </div>
+                        <span class="expand-icon" id="icon-ls_test_ls_test">▼</span>
+                    </div>
+                    <div class="issue-content" id="content-ls_test_ls_test">
+                        <div class="info-row"><div class="info-label">📦 命名空间</div><div class="info-value">ls-test</div></div>
+                        <div class="info-row"><div class="info-label">📝 名称</div><div class="info-value">ls-test</div></div>
+                        <div class="info-row"><div class="info-label">⚠️ 风险等级</div><div class="info-value">✅ 兼容</div></div>
+                        
+                        
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-ingress-id="ls_test_ls_test"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="issue-item">
+                    <div class="issue-header" onclick="toggleIngress('ls_test_ls_test2')">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" data-ingress-id="ls_test_ls_test2" onclick="event.stopPropagation()">
+                        </div>
+                        <div class="issue-title">
+                            <span class="badge badge-success">兼容</span>
+                            <span class="annotation-name">
+                                <span class="anno-text">ls-test/ls-test2</span>
+                                <span class="copy-btn" onclick="event.stopPropagation(); copyAnnotation(this, 'ls-test/ls-test2')" title="复制">📋</span>
+                            </span>
+                            <span class="ingress-count">无注解</span>
+                        </div>
+                        <span class="expand-icon" id="icon-ls_test_ls_test2">▼</span>
+                    </div>
+                    <div class="issue-content" id="content-ls_test_ls_test2">
+                        <div class="info-row"><div class="info-label">📦 命名空间</div><div class="info-value">ls-test</div></div>
+                        <div class="info-row"><div class="info-label">📝 名称</div><div class="info-value">ls-test2</div></div>
+                        <div class="info-row"><div class="info-label">⚠️ 风险等级</div><div class="info-value">✅ 兼容</div></div>
+                        
+                        
+                        <div class="action-box">
+                            <h4>📝 处理方式说明</h4>
+                            <textarea class="action-input" data-ingress-id="ls_test_ls_test2"
+                                      placeholder="请输入具体的处理方式、负责人、预计完成时间等..." rows="3"></textarea>
+                        </div>
+                    </div>
+                </div></div></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab-button').forEach(btn => {
+                btn.classList.toggle('active',
+                    (tabName === 'ingress' && btn.textContent.includes('Ingress')) ||
+                    (tabName === 'annotation' && btn.textContent.includes('注解')));
+            });
+            document.querySelectorAll('.tab-content').forEach(c => {
+                c.classList.toggle('active', c.id === 'tab-' + tabName);
+            });
+        }
+        function toggleIngress(id) {
+            var c = document.getElementById('content-' + id);
+            var i = document.getElementById('icon-' + id);
+            if (c.classList.contains('expanded')) { c.classList.remove('expanded'); i.classList.add('collapsed'); }
+            else { c.classList.add('expanded'); i.classList.remove('collapsed'); }
+        }
+        function togglePriority(id) {
+            var c = document.getElementById('content-' + id);
+            var i = document.getElementById('toggle-' + id);
+            if (c.classList.contains('expanded')) { c.classList.remove('expanded'); c.classList.add('collapsed'); i.classList.add('collapsed'); }
+            else { c.classList.remove('collapsed'); c.classList.add('expanded'); i.classList.remove('collapsed'); }
+        }
+        function scrollToSection(sectionId) {
+            if (!sectionId) return;
+            var el = document.getElementById(sectionId);
+            if (el) { setTimeout(function() { el.scrollIntoView({behavior:'smooth',block:'start'}); el.style.transition='background-color 0.6s'; var orig=el.style.backgroundColor; el.style.backgroundColor='#fff3cd'; setTimeout(function(){el.style.backgroundColor=orig;},1500); }, 100); }
+        }
+        function saveProgress() {
+            var progress = {};
+            document.querySelectorAll('.checkbox-wrapper input[type="checkbox"]').forEach(function(cb) {
+                var id = cb.dataset.issueId || cb.dataset.ingressId;
+                var ta = document.querySelector('textarea[data-issue-id="'+id+'"]') || document.querySelector('textarea[data-ingress-id="'+id+'"]');
+                progress[id] = {checked: cb.checked, action: ta ? ta.value : ''};
+            });
+            localStorage.setItem('migration_progress_v2', JSON.stringify(progress));
+            alert('✅ 进度已保存到本地');
+        }
+        function exportReport() {
+            var blob = new Blob([document.documentElement.outerHTML], {type: 'text/html'});
+            var a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+            a.download = 'migration-report-' + new Date().toISOString().slice(0,10) + '.html';
+            a.click();
+        }
+        function toggleIssue(el) {
+            var c = el.nextElementSibling; var i = el.querySelector('.expand-icon');
+            c.classList.toggle('expanded'); i.classList.toggle('expanded');
+        }
+        function toggleIssueGroup(groupId) {
+            var c = document.getElementById('content-' + groupId);
+            var i = document.getElementById('icon-' + groupId);
+            if (c.classList.contains('expanded')) { c.classList.remove('expanded'); i.classList.add('collapsed'); }
+            else { c.classList.add('expanded'); i.classList.remove('collapsed'); }
+        }
+        function expandAll() {
+            document.querySelectorAll('.issue-content').forEach(function(el){el.classList.add('expanded');});
+            document.querySelectorAll('.expand-icon').forEach(function(el){el.classList.add('expanded');});
+            document.querySelectorAll('.issue-group-content').forEach(function(el){el.classList.add('expanded');});
+            document.querySelectorAll('.issue-group-header .group-icon').forEach(function(el){el.classList.remove('collapsed');});
+            document.querySelectorAll('.priority-content').forEach(function(el){el.classList.remove('collapsed');el.classList.add('expanded');});
+            document.querySelectorAll('.priority-toggle-icon').forEach(function(el){el.classList.remove('collapsed');});
+        }
+        function collapseAll() {
+            document.querySelectorAll('.issue-content').forEach(function(el){el.classList.remove('expanded');});
+            document.querySelectorAll('.expand-icon').forEach(function(el){el.classList.remove('expanded');});
+            document.querySelectorAll('.issue-group-content').forEach(function(el){el.classList.remove('expanded');});
+            document.querySelectorAll('.issue-group-header .group-icon').forEach(function(el){el.classList.add('collapsed');});
+            document.querySelectorAll('.priority-content').forEach(function(el){el.classList.remove('expanded');el.classList.add('collapsed');});
+            document.querySelectorAll('.priority-toggle-icon').forEach(function(el){el.classList.add('collapsed');});
+        }
+        function filterIssues(filter) {
+            document.querySelectorAll('.filter-btn').forEach(function(b){b.classList.toggle('active',b.dataset.filter===filter);});
+            document.querySelectorAll('.issue-item').forEach(function(item) {
+                var cb = item.querySelector('input[type="checkbox"]');
+                if (!cb) { item.style.display = ''; return; }
+                if (filter === 'all') item.style.display = '';
+                else if (filter === 'checked') item.style.display = cb.checked ? '' : 'none';
+                else item.style.display = cb.checked ? 'none' : '';
+            });
+        }
+        function copyAnnotation(btn, text) {
+            navigator.clipboard.writeText(text).then(function() {
+                var orig = btn.textContent; btn.textContent = '✓'; btn.classList.add('copied');
+                setTimeout(function(){btn.textContent=orig;btn.classList.remove('copied');},1500);
+            });
+        }
+        // 加载保存的进度
+        (function() {
+            var saved = localStorage.getItem('migration_progress_v2');
+            if (saved) {
+                var progress = JSON.parse(saved);
+                Object.keys(progress).forEach(function(key) {
+                    var cb = document.querySelector('input[data-issue-id="'+key+'"]') || document.querySelector('input[data-ingress-id="'+key+'"]');
+                    if (cb) { cb.checked = progress[key].checked; }
+                    var ta = document.querySelector('textarea[data-issue-id="'+key+'"]') || document.querySelector('textarea[data-ingress-id="'+key+'"]');
+                    if (ta && progress[key].action) { ta.value = progress[key].action; }
+                });
+            }
+        })();
+    </script>
+</body>
+</html>
