@@ -26,8 +26,8 @@ import (
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/tidwall/sjson"
 
-	"github.com/higress-group/wasm-go/pkg/log"
 	"github.com/alibaba/higress/plugins/wasm-go/pkg/mcp/utils"
+	"github.com/higress-group/wasm-go/pkg/log"
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 )
 
@@ -396,9 +396,14 @@ func (t *RestMCPTool) Create(params []byte) Tool {
 		arguments:  make(map[string]interface{}),
 	}
 
-	// Parse raw arguments
+	// Parse raw arguments using json.Decoder with UseNumber() to preserve
+	// integer precision. Without UseNumber(), json.Unmarshal decodes all
+	// numbers into float64, which only has ~15-16 digits of precision and
+	// silently corrupts int64 values larger than 2^53.
 	var rawArgs map[string]interface{}
-	if err := json.Unmarshal(params, &rawArgs); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(params))
+	decoder.UseNumber()
+	if err := decoder.Decode(&rawArgs); err != nil {
 		log.Warnf("Failed to parse tool arguments: %v", err)
 	}
 
@@ -421,6 +426,8 @@ func (t *RestMCPTool) Create(params []byte) Tool {
 			switch v := rawValue.(type) {
 			case bool:
 				newTool.arguments[arg.Name] = v
+			case json.Number:
+				newTool.arguments[arg.Name] = v.String() != "0"
 			case string:
 				if v == "true" {
 					newTool.arguments[arg.Name] = true
@@ -433,13 +440,19 @@ func (t *RestMCPTool) Create(params []byte) Tool {
 				newTool.arguments[arg.Name] = rawValue
 			}
 		case "integer":
-			// Convert to integer
+			// Convert to integer, preserving full int64 precision
 			switch v := rawValue.(type) {
+			case json.Number:
+				if intVal, err := v.Int64(); err == nil {
+					newTool.arguments[arg.Name] = intVal
+				} else {
+					newTool.arguments[arg.Name] = rawValue
+				}
 			case float64:
-				newTool.arguments[arg.Name] = int(v)
+				newTool.arguments[arg.Name] = int64(v)
 			case string:
 				if intVal, err := json.Number(v).Int64(); err == nil {
-					newTool.arguments[arg.Name] = int(intVal)
+					newTool.arguments[arg.Name] = intVal
 				} else {
 					newTool.arguments[arg.Name] = rawValue
 				}
@@ -449,6 +462,12 @@ func (t *RestMCPTool) Create(params []byte) Tool {
 		case "number":
 			// Convert to number (float64)
 			switch v := rawValue.(type) {
+			case json.Number:
+				if floatVal, err := v.Float64(); err == nil {
+					newTool.arguments[arg.Name] = floatVal
+				} else {
+					newTool.arguments[arg.Name] = rawValue
+				}
 			case string:
 				if floatVal, err := json.Number(v).Float64(); err == nil {
 					newTool.arguments[arg.Name] = floatVal
@@ -459,8 +478,20 @@ func (t *RestMCPTool) Create(params []byte) Tool {
 				newTool.arguments[arg.Name] = rawValue
 			}
 		default:
-			// For string, array, object, or unspecified types, use as is
-			newTool.arguments[arg.Name] = rawValue
+			// For string, array, object, or unspecified types
+			// Convert json.Number back to numeric type to maintain compatibility
+			if v, ok := rawValue.(json.Number); ok {
+				// Try int64 first, then float64, fall back to string
+				if intVal, err := v.Int64(); err == nil {
+					newTool.arguments[arg.Name] = intVal
+				} else if floatVal, err := v.Float64(); err == nil {
+					newTool.arguments[arg.Name] = floatVal
+				} else {
+					newTool.arguments[arg.Name] = v.String()
+				}
+			} else {
+				newTool.arguments[arg.Name] = rawValue
+			}
 		}
 	}
 
