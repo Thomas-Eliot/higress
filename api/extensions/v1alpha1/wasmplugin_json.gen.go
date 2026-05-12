@@ -28,6 +28,17 @@ func (this *MatchRule) UnmarshalJSON(b []byte) error {
 	return WasmpluginUnmarshaler.Unmarshal(bytes.NewReader(b), this)
 }
 
+// MarshalJSON is a custom marshaler for ResourceTemplateSchemaEntry
+func (this *ResourceTemplateSchemaEntry) MarshalJSON() ([]byte, error) {
+	str, err := WasmpluginMarshaler.MarshalToString(this)
+	return []byte(str), err
+}
+
+// UnmarshalJSON is a custom unmarshaler for ResourceTemplateSchemaEntry
+func (this *ResourceTemplateSchemaEntry) UnmarshalJSON(b []byte) error {
+	return WasmpluginUnmarshaler.Unmarshal(bytes.NewReader(b), this)
+}
+
 // MarshalJSON is a custom marshaler for VmConfig
 func (this *VmConfig) MarshalJSON() ([]byte, error) {
 	str, err := WasmpluginMarshaler.MarshalToString(this)

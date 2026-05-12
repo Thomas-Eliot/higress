@@ -113,6 +113,12 @@ message WasmPlugin {
   repeated MatchRule match_rules = 102;
   // disable the default config
   google.protobuf.BoolValue default_config_disable = 103;
+  // Extended by Higress, references to ConfigMaps for sharded plugin config
+  // The controller will watch these ConfigMaps and merge their data into the final config
+  repeated string resource_refs = 104;
+  // Extended by Higress, template schema for rendering sharded config
+  // Defines the mapping between ConfigMap data keys and placeholder names
+  repeated ResourceTemplateSchemaEntry resource_template_schema = 105;
 }
 
 // Extended by Higress
@@ -124,6 +130,15 @@ message MatchRule {
   repeated string service = 5;
   // Route type for this match rule, defaults to HTTP
   RouteType route_type = 6;
+}
+
+// Extended by Higress, template schema entry for config sharding
+// Maps a ConfigMap data key to a placeholder name used in rendering
+message ResourceTemplateSchemaEntry {
+  // The key in ConfigMap's data field (e.g. "consumers", "matchRules")
+  string key = 1;
+  // The placeholder name (e.g. "consumers", "matchRules")
+  string value = 2;
 }
 
 // Route type for matching rules.

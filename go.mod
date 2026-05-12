@@ -42,6 +42,7 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20251029180050-ab9386a59fda
 	google.golang.org/grpc v1.78.0
 	google.golang.org/protobuf v1.36.11
+	gopkg.in/yaml.v2 v2.4.0
 	istio.io/api v1.27.1-0.20250820125923-f5a5d3a605a9
 	istio.io/client-go v1.27.1-0.20250820130622-12f6d11feb40
 	istio.io/istio v0.0.0
