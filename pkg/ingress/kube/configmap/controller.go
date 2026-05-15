@@ -129,9 +129,9 @@ func (c *ConfigmapMgr) AddItemControllers(controllers ...ItemController) {
 }
 
 func (c *ConfigmapMgr) AddOrUpdateHigressConfig(name util.ClusterNamespacedName) {
-	// Handle shard ConfigMap changes: trigger xDS push for WasmPlugin re-rendering
-	if strings.HasPrefix(name.Name, "hi-key-auth-shard-") {
-		IngressLog.Infof("Shard ConfigMap changed: %s, triggering WasmPlugin re-conversion", name.Name)
+	// Handle shard ConfigMap and route switches ConfigMap changes: trigger xDS push for WasmPlugin re-rendering
+	if strings.HasPrefix(name.Name, "hi-key-auth-shard-") || name.Name == "hi-key-auth-route-switches" {
+		IngressLog.Infof("Key-auth ConfigMap changed: %s, triggering WasmPlugin re-conversion", name.Name)
 		if c.ShardConfigMapHandler != nil {
 			c.ShardConfigMapHandler(name)
 		}

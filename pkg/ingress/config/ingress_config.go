@@ -1188,9 +1188,18 @@ func (m *IngressConfig) onShardConfigMapChanged(name util.ClusterNamespacedName)
 // mergeShardedConfigMaps reads all ConfigMaps referenced by resourceRefs,
 // and merges their data into the WasmPlugin's defaultConfig and matchRules.
 //
-// For "consumers" key: YAML array fragments are parsed and merged into defaultConfig.consumers
-// For "matchRules" key: YAML array fragments are parsed, then matchRules with the same ingress
-// are merged (their allow lists are combined)
+// Data layering:
+//   - Route switches ConfigMap (hi-key-auth-route-switches): matchRules contain only configDisable + ingress (no allow)
+//     This is the source of truth for route enable/disable state.
+//   - Shard ConfigMaps (hi-key-auth-shard-*): matchRules contain only allow + ingress (no configDisable)
+//     Each shard contains the allow list for consumers hashed to that shard.
+//
+// Merge logic:
+//  1. Aggregate consumers from all shard ConfigMaps into defaultConfig.consumers
+//  2. Aggregate allow lists from shard ConfigMaps, grouped by ingress
+//  3. Read configDisable state from route switches ConfigMap
+//  4. Build final matchRules: for each route, set allow (from shards) and configDisable (from switches)
+//     If a route has configDisable=true, its allow list is still included but the route is effectively disabled.
 func (m *IngressConfig) mergeShardedConfigMaps(obj *higressext.WasmPlugin) {
 	if len(obj.ResourceRefs) == 0 {
 		return
@@ -1198,18 +1207,13 @@ func (m *IngressConfig) mergeShardedConfigMaps(obj *higressext.WasmPlugin) {
 
 	IngressLog.Debugf("mergeShardedConfigMaps: processing %d resourceRefs", len(obj.ResourceRefs))
 
-	// Build schema map: key -> value (placeholder name)
-	schemaMap := make(map[string]string)
-	for _, entry := range obj.ResourceTemplateSchema {
-		if entry != nil {
-			schemaMap[entry.Key] = entry.Value
-		}
-	}
+	const routeSwitchesCMName = "hi-key-auth-route-switches"
 
 	var allConsumers []interface{}
-	var allMatchRules []interface{}
+	var shardMatchRules []interface{}  // matchRules from shard ConfigMaps (allow + ingress only)
+	var switchMatchRules []interface{} // matchRules from route switches ConfigMap (configDisable + ingress only)
 
-	// Read each referenced ConfigMap
+	// Read each referenced ConfigMap, separating route switches from shard data
 	for _, cmName := range obj.ResourceRefs {
 		cm, err := m.configmapMgr.HigressConfigLister.Get(cmName)
 		if err != nil {
@@ -1220,23 +1224,31 @@ func (m *IngressConfig) mergeShardedConfigMaps(obj *higressext.WasmPlugin) {
 			continue
 		}
 
-		// Process consumers
-		if consumersData, ok := cm.Data["consumers"]; ok && consumersData != "" {
-			var consumers []interface{}
-			if err := yaml.Unmarshal([]byte(consumersData), &consumers); err != nil {
-				IngressLog.Warnf("Failed to parse consumers from ConfigMap %s: %v", cmName, err)
-			} else {
-				allConsumers = append(allConsumers, consumers...)
+		isRouteSwitches := cmName == routeSwitchesCMName
+
+		// Process consumers (only from shard ConfigMaps, not route switches)
+		if !isRouteSwitches {
+			if consumersData, ok := cm.Data["consumers"]; ok && consumersData != "" {
+				var consumers []interface{}
+				if err := yaml.Unmarshal([]byte(consumersData), &consumers); err != nil {
+					IngressLog.Warnf("Failed to parse consumers from ConfigMap %s: %v", cmName, err)
+				} else {
+					allConsumers = append(allConsumers, consumers...)
+				}
 			}
 		}
 
-		// Process matchRules
+		// Process matchRules — route to different collectors
 		if matchRulesData, ok := cm.Data["matchRules"]; ok && matchRulesData != "" {
 			var rules []interface{}
 			if err := yaml.Unmarshal([]byte(matchRulesData), &rules); err != nil {
 				IngressLog.Warnf("Failed to parse matchRules from ConfigMap %s: %v", cmName, err)
 			} else {
-				allMatchRules = append(allMatchRules, rules...)
+				if isRouteSwitches {
+					switchMatchRules = append(switchMatchRules, rules...)
+				} else {
+					shardMatchRules = append(shardMatchRules, rules...)
+				}
 			}
 		}
 	}
@@ -1257,7 +1269,6 @@ func (m *IngressConfig) mergeShardedConfigMaps(obj *higressext.WasmPlugin) {
 			// Append to existing consumers list (don't overwrite)
 			existingConsumers := obj.DefaultConfig.Fields["consumers"]
 			if existingConsumers != nil && existingConsumers.GetListValue() != nil {
-				// Append new consumers to existing list
 				newList := consumersValue.GetListValue()
 				if newList != nil {
 					existingConsumers.GetListValue().Values = append(existingConsumers.GetListValue().Values, newList.Values...)
@@ -1270,41 +1281,196 @@ func (m *IngressConfig) mergeShardedConfigMaps(obj *higressext.WasmPlugin) {
 		}
 	}
 
-	// Merge matchRules: combine allow lists into existing matchRules with the same ingress
-	if len(allMatchRules) > 0 {
-		mergedRules := mergeMatchRulesByIngress(allMatchRules)
-		// Merge into existing matchRules (add to allow list of matching ingress)
-		for _, newRule := range mergedRules {
-			if len(newRule.Ingress) == 0 {
-				continue
-			}
-			targetIngress := newRule.Ingress[0]
-			found := false
-			for _, existingRule := range obj.MatchRules {
-				if len(existingRule.Ingress) > 0 && existingRule.Ingress[0] == targetIngress {
-					// Merge allow lists
-					if existingRule.Config != nil && newRule.Config != nil {
-						existingAllow := existingRule.Config.Fields["allow"]
-						newAllow := newRule.Config.Fields["allow"]
-						if existingAllow != nil && newAllow != nil {
-							existingList := existingAllow.GetListValue()
-							newList := newAllow.GetListValue()
-							if existingList != nil && newList != nil {
-								existingList.Values = append(existingList.Values, newList.Values...)
-							}
-						} else if existingAllow == nil && newAllow != nil {
-							existingRule.Config.Fields["allow"] = newAllow
+	// Build configDisable map from route switches ConfigMap
+	// Parse switches into MatchRules with configDisable (no allow)
+	switchRules := parseScopeSwitches(switchMatchRules)
+	IngressLog.Debugf("mergeShardedConfigMaps: parsed %d scope switches", len(switchRules))
+
+	// Aggregate allow lists from shard ConfigMaps by ingress
+	mergedAllowRules := mergeMatchRulesByIngress(shardMatchRules)
+	IngressLog.Debugf("mergeShardedConfigMaps: merged allow rules for %d routes from shards", len(mergedAllowRules))
+
+	// Build final matchRules: combine allow (from shards) with configDisable (from switches)
+	// Also include scopes that only exist in switches (no allow yet, but have configDisable state)
+	processedIngresses := make(map[string]bool)
+
+	for _, allowRule := range mergedAllowRules {
+		if len(allowRule.Ingress) == 0 {
+			continue
+		}
+		ingressName := allowRule.Ingress[0]
+		processedIngresses[ingressName] = true
+
+		// Apply configDisable from switches if present
+		if sw := findSwitchByIngress(switchRules, ingressName); sw != nil && isBoolValueTrue(sw.ConfigDisable) {
+			allowRule.ConfigDisable = &wrappers.BoolValue{Value: true}
+		}
+
+		// Merge into existing matchRules or append
+		found := false
+		for _, existingRule := range obj.MatchRules {
+			if len(existingRule.Ingress) > 0 && existingRule.Ingress[0] == ingressName {
+				// Merge allow lists
+				if existingRule.Config != nil && allowRule.Config != nil {
+					existingAllow := existingRule.Config.Fields["allow"]
+					newAllow := allowRule.Config.Fields["allow"]
+					if existingAllow != nil && newAllow != nil {
+						existingList := existingAllow.GetListValue()
+						newList := newAllow.GetListValue()
+						if existingList != nil && newList != nil {
+							existingList.Values = append(existingList.Values, newList.Values...)
 						}
+					} else if existingAllow == nil && newAllow != nil {
+						existingRule.Config.Fields["allow"] = newAllow
 					}
-					found = true
-					break
 				}
-			}
-			if !found {
-				obj.MatchRules = append(obj.MatchRules, newRule)
+				// Apply configDisable
+				if sw := findSwitchByIngress(switchRules, ingressName); sw != nil && isBoolValueTrue(sw.ConfigDisable) {
+					existingRule.ConfigDisable = &wrappers.BoolValue{Value: true}
+				}
+				found = true
+				break
 			}
 		}
+		if !found {
+			obj.MatchRules = append(obj.MatchRules, allowRule)
+		}
 	}
+
+	// Add scopes that only exist in switches (no allow from shards)
+	// These are scopes with configDisable state but no consumer authorizations yet
+	for _, sw := range switchRules {
+		// Skip ingress-based switches that were already processed via shard allow rules
+		if len(sw.Ingress) > 0 && processedIngresses[sw.Ingress[0]] {
+			continue
+		}
+
+		// Check if already in existing matchRules (match by ingress, domain, or service)
+		found := false
+		for _, existingRule := range obj.MatchRules {
+			if matchRuleScopeEquals(existingRule, sw) {
+				if isBoolValueTrue(sw.ConfigDisable) {
+					existingRule.ConfigDisable = &wrappers.BoolValue{Value: true}
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			// Create a matchRule with empty allow and the configDisable state
+			rule := &higressext.MatchRule{
+				Ingress: sw.Ingress,
+				Domain:  sw.Domain,
+				Service: sw.Service,
+				Config: &_struct.Struct{
+					Fields: map[string]*_struct.Value{
+						"allow": {
+							Kind: &_struct.Value_ListValue{
+								ListValue: &_struct.ListValue{Values: []*_struct.Value{}},
+							},
+						},
+					},
+				},
+			}
+			if isBoolValueTrue(sw.ConfigDisable) {
+				rule.ConfigDisable = &wrappers.BoolValue{Value: true}
+			}
+			obj.MatchRules = append(obj.MatchRules, rule)
+		}
+	}
+}
+
+// parseScopeSwitches extracts configDisable state from scope switches matchRules.
+// Supports ingress, domain, and service scope types.
+// Returns a slice of MatchRules with only scope fields and ConfigDisable set (no config/allow).
+func parseScopeSwitches(rawRules []interface{}) []*higressext.MatchRule {
+	var result []*higressext.MatchRule
+	for _, raw := range rawRules {
+		ruleMap, ok := raw.(map[interface{}]interface{})
+		if !ok {
+			if ruleMapStr, ok2 := raw.(map[string]interface{}); ok2 {
+				ruleMap = make(map[interface{}]interface{})
+				for k, v := range ruleMapStr {
+					ruleMap[k] = v
+				}
+			} else {
+				continue
+			}
+		}
+
+		// Extract scope: ingress, domain, or service
+		var ingress, domain, service []string
+		if ingressRaw, ok := ruleMap["ingress"]; ok {
+			ingress = extractStringList(ingressRaw)
+		}
+		if domainRaw, ok := ruleMap["domain"]; ok {
+			domain = extractStringList(domainRaw)
+		}
+		if serviceRaw, ok := ruleMap["service"]; ok {
+			service = extractStringList(serviceRaw)
+		}
+
+		if len(ingress) == 0 && len(domain) == 0 && len(service) == 0 {
+			continue
+		}
+
+		// Extract configDisable
+		var configDisable *wrappers.BoolValue
+		if disableRaw, ok := ruleMap["configDisable"]; ok {
+			switch v := disableRaw.(type) {
+			case bool:
+				configDisable = &wrappers.BoolValue{Value: v}
+			case string:
+				configDisable = &wrappers.BoolValue{Value: v == "true"}
+			}
+		}
+
+		rule := &higressext.MatchRule{
+			Ingress:       ingress,
+			Domain:        domain,
+			Service:       service,
+			ConfigDisable: configDisable,
+		}
+		result = append(result, rule)
+	}
+	return result
+}
+
+// extractStringList extracts a []string from a YAML-parsed interface ([]interface{})
+func extractStringList(v interface{}) []string {
+	list, ok := v.([]interface{})
+	if !ok || len(list) == 0 {
+		return nil
+	}
+	var result []string
+	for _, item := range list {
+		result = append(result, fmt.Sprintf("%v", item))
+	}
+	return result
+}
+
+// findSwitchByIngress finds a switch rule matching the given ingress name
+func findSwitchByIngress(switches []*higressext.MatchRule, ingressName string) *higressext.MatchRule {
+	for _, sw := range switches {
+		if len(sw.Ingress) > 0 && sw.Ingress[0] == ingressName {
+			return sw
+		}
+	}
+	return nil
+}
+
+// matchRuleScopeEquals checks if two MatchRules have the same scope (ingress/domain/service)
+func matchRuleScopeEquals(a, b *higressext.MatchRule) bool {
+	if len(a.Ingress) > 0 && len(b.Ingress) > 0 {
+		return a.Ingress[0] == b.Ingress[0]
+	}
+	if len(a.Domain) > 0 && len(b.Domain) > 0 {
+		return a.Domain[0] == b.Domain[0]
+	}
+	if len(a.Service) > 0 && len(b.Service) > 0 {
+		return a.Service[0] == b.Service[0]
+	}
+	return false
 }
 
 // mergeMatchRulesByIngress takes raw matchRule interfaces from multiple shards,
