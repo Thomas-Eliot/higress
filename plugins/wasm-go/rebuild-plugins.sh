@@ -1,7 +1,11 @@
 #!/bin/bash
 
 # 脚本功能：重新编译指定的wasm插件并生成对应的目录结构
-# 使用方法: ./rebuild-plugins.sh
+# 使用方法:
+#   ./rebuild-plugins.sh                       # 编译默认插件列表（全量）
+#   ./rebuild-plugins.sh ai-proxy              # 仅编译 ai-proxy
+#   ./rebuild-plugins.sh ai-proxy ai-statistics  # 编译指定的多个插件
+#   ./rebuild-plugins.sh --help                # 显示帮助
 
 set -e
 
@@ -14,8 +18,8 @@ NC='\033[0m' # No Color
 # 输出目录
 OUTPUT_DIR="rebuild-plugins"
 
-# 需要编译的插件列表（从目录名获取）
-PLUGINS=(
+# 默认编译的插件列表（未指定参数时使用）
+DEFAULT_PLUGINS=(
     "ai-load-balancer"
     "ai-proxy"
     "ai-security-guard"
@@ -24,6 +28,23 @@ PLUGINS=(
     "jsonrpc-converter-pre-response"
     "log-request-response"
 )
+
+# 解析命令行参数：有参数则覆盖默认列表
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    echo "用法: $0 [plugin-name ...]"
+    echo ""
+    echo "未指定参数时编译以下默认插件:"
+    for p in "${DEFAULT_PLUGINS[@]}"; do
+        echo "  - $p"
+    done
+    exit 0
+fi
+
+if [ $# -gt 0 ]; then
+    PLUGINS=("$@")
+else
+    PLUGINS=("${DEFAULT_PLUGINS[@]}")
+fi
 
 # 版本列表
 VERSIONS=("1.0.0" "2.0.0")
