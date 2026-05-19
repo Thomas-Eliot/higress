@@ -1631,7 +1631,7 @@ func (m *IngressConfig) AddOrUpdateWasmPlugin(clusterNamespacedName util.Cluster
 		IngressLog.Debug("WasmPlugin triggered update")
 		f(config.Config{Meta: metadata}, config.Config{Meta: metadata}, istiomodel.EventUpdate)
 	}
-	istioWasmPlugin, err := m.convertIstioWasmPlugin(&wasmPlugin.Spec)
+	istioWasmPlugin, err := m.convertIstioWasmPlugin(wasmPlugin.Spec.DeepCopy())
 	if err != nil {
 		IngressLog.Errorf("invalid wasmPlugin:%s, err:%v", clusterNamespacedName.Name, err)
 		return
