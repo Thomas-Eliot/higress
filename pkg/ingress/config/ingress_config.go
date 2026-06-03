@@ -1205,16 +1205,12 @@ func (m *IngressConfig) mergeShardedConfigMaps(obj *higressext.WasmPlugin) {
 		return
 	}
 
-	IngressLog.Debugf("mergeShardedConfigMaps: processing %d resourceRefs", len(obj.ResourceRefs))
+	IngressLog.Debugf("mergeShardedConfigMaps: processing %d resourceRefs, inlineMatchRules=%d",
+		len(obj.ResourceRefs), len(obj.MatchRules))
 
-	// IMPORTANT: Clear previously merged data to avoid duplication on re-conversion.
-	// Each call to convertIstioWasmPlugin triggers mergeShardedConfigMaps, and the obj
-	// may retain data from a previous merge cycle (cached by the controller).
-	// We must start from a clean state every time.
-	obj.MatchRules = nil
-	if obj.DefaultConfig != nil && obj.DefaultConfig.Fields != nil {
-		delete(obj.DefaultConfig.Fields, "consumers")
-	}
+	// obj is a DeepCopy of the CR spec (see AddOrUpdateWasmPlugin), so inline data
+	// (consumers in defaultConfig + matchRules) is naturally preserved across calls.
+	// Shard data from ConfigMaps is appended/merged on top of the inline data below.
 
 	const routeSwitchesCMName = "hi-key-auth-route-switches"
 
