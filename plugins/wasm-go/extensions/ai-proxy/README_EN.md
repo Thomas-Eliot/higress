@@ -25,6 +25,8 @@ The plugin now supports **automatic protocol detection**, allowing seamless comp
 
 > When the request path suffix matches `/v1/embeddings`, it corresponds to text vector scenarios. The request body will be parsed using OpenAI's text vector protocol and then converted to the corresponding LLM vendor's text vector protocol.
 
+> When the request path suffix matches `/v1/images/generations`, it corresponds to text-to-image scenarios. The request body will be parsed using OpenAI's image generation protocol and then converted to the corresponding LLM vendor's image generation protocol.
+
 ## Execution Properties
 Plugin execution phase: `Default Phase`
 Plugin execution priority: `100`
@@ -49,7 +51,10 @@ Plugin execution priority: `100`
 | `protocol`       | string                 | Optional    | -       | API contract provided by the plugin. Currently supports the following values: openai (default, uses OpenAI's interface contract), original (uses the raw interface contract of the target service provider). **Note: Auto protocol detection is now supported, no need to configure this field to support both OpenAI and Claude protocols**                                                                                                                                                                               |
 | `context`        | object                 | Optional    | -       | Configuration for AI conversation context information                                                                                                                                                                                                                                                                                                                                     |
 | `customSettings` | array of customSetting | Optional    | -       | Specifies overrides or fills parameters for AI requests                                                                                                                                                                                                                                                                                                                                   |
-| `subPath`        | string                 | Optional    | -       | If subPath is configured, the prefix will be removed from the request path before further processing.                                                                                                                                                                                                                                                                                     |
+| `failover`       | object                 | Optional    | -       | Configures apiToken failover. When an apiToken becomes unavailable, it is removed from the available token list and restored after a successful health check or after the cooldown period expires.                                                                                                                                                                                        |
+| `basePath`        | string                 | Optional    | -       | If configured, basePath can be used to remove the prefix from the request path, or prepend the prefix to the request path. Defaults to removal.                                                                                                                                                                                                                                              |
+| `basePathHandling` | string               | Optional    | removePrefix | basePathHandling specifies how basePath is processed. Possible values: removePrefix (removes the basePath prefix from the request path before forwarding to upstream), prepend (adds the basePath prefix to the request path when forwarding to upstream)                                                                                                                                                                                                                                                                                                |
+| `contextCleanupCommands` | array of string | Optional    | -       | List of context cleanup commands. When a user message in the request exactly matches any of the configured commands, that message and all non-system messages before it will be removed, keeping only system messages and messages after the command. This enables users to actively clear conversation history.                                                                           |
 
 **Details for the `context` configuration fields:**
 
@@ -81,6 +86,21 @@ The `custom-setting` adheres to the following table, replacing the corresponding
 If raw mode is enabled, `custom-setting` will directly alter the JSON content using the input `name` and `value`, without any restrictions or modifications to the parameter names.
 For most protocols, `custom-setting` modifies or fills parameters at the root path of the JSON content. For the `qwen` protocol, ai-proxy configures under the `parameters` subpath. For the `gemini` protocol, it configures under the `generation_config` subpath.
 
+**Details for the `failover` configuration fields:**
+
+| Name                  | Data Type       | Requirement                                      | Default        | Description                                                                                                          |
+| --------------------- | --------------- | ------------------------------------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `enabled`             | bool            | Optional                                         | false          | Whether to enable apiToken failover.                                                                                 |
+| `failureThreshold`    | int             | Optional                                         | 3              | Number of consecutive request failures required before triggering failover.                                           |
+| `successThreshold`    | int             | Optional                                         | 1              | Number of successful health checks required before restoring an unavailable apiToken.                                 |
+| `healthCheckInterval` | int             | Optional                                         | 5000           | Health check interval in milliseconds.                                                                               |
+| `healthCheckTimeout`  | int             | Optional                                         | 5000           | Health check timeout in milliseconds.                                                                                |
+| `healthCheckModel`    | string          | Required when failover is enabled unless `cooldownDuration` is configured | - | Model used for health checks. When configured, unavailable apiTokens can be restored after passing health checks.     |
+| `cooldownDuration`    | int             | Required when failover is enabled unless `healthCheckModel` is configured | 0 | Cooldown duration in milliseconds after an apiToken becomes unavailable. When greater than 0, the apiToken is restored automatically after the cooldown expires. |
+| `failoverOnStatus`    | array of string | Optional                                         | ["4.*", "5.*"] | Response status codes that trigger failover for original requests. Regular expressions are supported.                 |
+
+At least one of `healthCheckModel` and `cooldownDuration` must be configured when failover is enabled. If both are configured, an apiToken can be restored either by a successful health check or after the cooldown period expires.
+
 ### Provider-Specific Configurations
 
 #### OpenAI
@@ -96,18 +116,20 @@ For OpenAI, the corresponding `type` is `openai`. Its unique configuration field
 
 For Azure OpenAI, the corresponding `type` is `azure`. Its unique configuration field is:
 
-| Name                 | Data Type   | Filling Requirements | Default Value | Description                                                                                                    |
-|---------------------|-------------|----------------------|---------------|---------------------------------------------------------------------------------------------------------------|
-| `azureServiceUrl`   | string      | Required             | -             | The URL of the Azure OpenAI service, must include the `api-version` query parameter.                           |
+| Name                 | Data Type   | Filling Requirements | Default Value | Description                                                                                                                               |
+|---------------------|-------------|----------------------|---------------|------------------------------------------------------------------------------------------------------------------------------------------|
+| `azureServiceUrl`   | string      | Required             | -             | Azure OpenAI service URL. The `/openai/v1` path does not require a dated `api-version`; legacy paths or resource-only mode still require it. |
 
 **Note:**
 1. Azure OpenAI only supports configuring one API Token.
-2. `azureServiceUrl` accepts three formats：
-    1. Full URL. e.g. `https://YOUR_RESOURCE_NAME.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT_NAME/chat/completions?api-version=2024-02-15-preview`
+2. `azureServiceUrl` accepts the new `/openai/v1` format and legacy formats:
+    1. v1 URL. e.g. `https://YOUR_RESOURCE_NAME.openai.azure.com/openai/v1`
+        - The plugin uses this v1 base URL directly and does not append a dated `api-version`.
+    2. Legacy full URL. e.g. `https://YOUR_RESOURCE_NAME.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT_NAME/chat/completions?api-version=2024-02-15-preview`
         - Request will be forwarded to the given URL, no matter what original path the request uses.
-    2. Resource name + deployment name，e.g. `https://YOUR_RESOURCE_NAME.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT_NAME?api-version=2024-02-15-preview`
+    3. Legacy resource name + deployment name, e.g. `https://YOUR_RESOURCE_NAME.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT_NAME?api-version=2024-02-15-preview`
         - The path will be updated based on the actual request path, leaving the deployment name unchanged. APIs with no deployment name in the path are also support.
-    3. Resource name only.e.g.`https://YOUR_RESOURCE_NAME.openai.azure.com?api-version=2024-02-15-preview`
+    4. Legacy resource name only, e.g. `https://YOUR_RESOURCE_NAME.openai.azure.com?api-version=2024-02-15-preview`
         - The path will be updated based on the actual request path. The deployment name will be filled based on the model name in the request and the configured model mapping rule. APIs with no deployment name in the path are also support.
 
 #### Moonshot
@@ -182,11 +204,22 @@ For MiniMax, the corresponding `type` is `minimax`. Its unique configuration fie
 
 #### Anthropic Claude
 
-For Anthropic Claude, the corresponding `type` is `claude`. Its unique configuration field is:
+For Anthropic Claude, the corresponding `type` is `claude`. Its unique configuration fields are:
 
 | Name        | Data Type   | Filling Requirements | Default Value | Description                                                                                                    |
 |------------|-------------|----------------------|---------------|---------------------------------------------------------------------------------------------------------------|
 | `claudeVersion` | string | Optional             | -             | The version of the Claude service's API, default is 2023-06-01.                                               |
+| `claudeCodeMode` | boolean | Optional             | false         | Enable Claude Code mode for OAuth token authentication. When enabled, requests will be formatted as Claude Code client requests. |
+
+**Claude Code Mode**
+
+When `claudeCodeMode: true` is enabled, the plugin will:
+- Use Bearer Token authentication instead of x-api-key (compatible with Claude Code OAuth tokens)
+- Set Claude Code-specific request headers (user-agent, x-app, anthropic-beta)
+- Add `?beta=true` query parameter to request URLs
+- Automatically inject Claude Code system prompt if not provided
+
+This enables direct use of Claude Code OAuth tokens for authentication in Higress.
 
 #### Ollama
 
@@ -323,7 +356,7 @@ provider:
   type: azure
   apiTokens:
     - "YOUR_AZURE_OPENAI_API_TOKEN"
-  azureServiceUrl: "https://YOUR_RESOURCE_NAME.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT_NAME/chat/completions?api-version=2024-02-15-preview",
+  azureServiceUrl: "https://YOUR_RESOURCE_NAME.openai.azure.com/openai/v1",
 ```
 
 **Request Example**
@@ -1145,6 +1178,44 @@ Both protocol formats will return responses in their respective formats:
 }
 ```
 
+### Using Claude Code Mode
+
+Claude Code is Anthropic's official CLI tool. By enabling `claudeCodeMode`, you can authenticate using Claude Code OAuth tokens:
+
+**Configuration Information**
+
+```yaml
+provider:
+  type: claude
+  apiTokens:
+    - "sk-ant-oat01-xxxxx"  # Claude Code OAuth Token
+  claudeCodeMode: true  # Enable Claude Code mode
+```
+
+Once this mode is enabled, the plugin will automatically:
+- Use Bearer Token authentication (instead of x-api-key)
+- Set Claude Code-specific request headers and query parameters
+- Inject Claude Code system prompt if not provided
+
+**Request Example**
+
+```json
+{
+  "model": "claude-sonnet-4-5-20250929",
+  "max_tokens": 8192,
+  "messages": [
+    {
+      "role": "user",
+      "content": "List files in current directory"
+    }
+  ]
+}
+```
+
+The plugin will automatically transform the request into Claude Code format, including:
+- Adding system prompt: `"You are Claude Code, Anthropic's official CLI for Claude."`
+- Setting appropriate authentication and request headers
+
 ### Using Intelligent Protocol Conversion
 
 When the target provider doesn't natively support Claude protocol, the plugin automatically performs protocol conversion:
@@ -1927,7 +1998,111 @@ provider:
 }
 ```
 
+### Utilizing OpenAI Protocol Proxy for Google Vertex Image Generation
+
+Vertex AI supports image generation using Gemini models. Through the ai-proxy plugin, you can use OpenAI's `/v1/images/generations` API to call Vertex AI's image generation capabilities.
+
+**Configuration Information**
+
+```yaml
+provider:
+  type: vertex
+  apiTokens:
+    - "YOUR_API_KEY"
+  modelMapping:
+    "dall-e-3": "gemini-2.0-flash-exp"
+  geminiSafetySetting:
+    HARM_CATEGORY_HARASSMENT: "OFF"
+    HARM_CATEGORY_HATE_SPEECH: "OFF"
+    HARM_CATEGORY_SEXUALLY_EXPLICIT: "OFF"
+    HARM_CATEGORY_DANGEROUS_CONTENT: "OFF"
+```
+
+**Using curl**
+
+```bash
+curl -X POST "http://your-gateway-address/v1/images/generations" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-2.0-flash-exp",
+    "prompt": "A cute orange cat napping in the sunshine",
+    "size": "1024x1024"
+  }'
+```
+
+**Using OpenAI Python SDK**
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="any-value",  # Can be any value, authentication is handled by the gateway
+    base_url="http://your-gateway-address/v1"
+)
+
+response = client.images.generate(
+    model="gemini-2.0-flash-exp",
+    prompt="A cute orange cat napping in the sunshine",
+    size="1024x1024",
+    n=1
+)
+
+# Get the generated image (base64 encoded)
+image_data = response.data[0].b64_json
+print(f"Generated image (base64): {image_data[:100]}...")
+```
+
+**Response Example**
+
+```json
+{
+  "created": 1729986750,
+  "data": [
+    {
+      "b64_json": "iVBORw0KGgoAAAANSUhEUgAABAAAAAQACAIAAADwf7zUAAAA..."
+    }
+  ],
+  "usage": {
+    "total_tokens": 1356,
+    "input_tokens": 13,
+    "output_tokens": 1120
+  }
+}
+```
+
+**Supported Size Parameters**
+
+Vertex AI supported aspect ratios: `1:1`, `3:2`, `2:3`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, `21:9`
+
+Vertex AI supported resolutions (imageSize): `1k`, `2k`, `4k`
+
+| OpenAI size parameter | Vertex AI aspectRatio | Vertex AI imageSize |
+|-----------------------|----------------------|---------------------|
+| 256x256               | 1:1                  | 1k                  |
+| 512x512               | 1:1                  | 1k                  |
+| 1024x1024             | 1:1                  | 1k                  |
+| 1792x1024             | 16:9                 | 2k                  |
+| 1024x1792             | 9:16                 | 2k                  |
+| 2048x2048             | 1:1                  | 2k                  |
+| 4096x4096             | 1:1                  | 4k                  |
+| 1536x1024             | 3:2                  | 2k                  |
+| 1024x1536             | 2:3                  | 2k                  |
+| 1024x768              | 4:3                  | 1k                  |
+| 768x1024              | 3:4                  | 1k                  |
+| 1280x1024             | 5:4                  | 1k                  |
+| 1024x1280             | 4:5                  | 1k                  |
+| 2560x1080             | 21:9                 | 2k                  |
+
+**Notes**
+
+- Image generation uses Gemini models (e.g., `gemini-2.0-flash-exp`, `gemini-3-pro-image-preview`). Model availability may vary by region
+- The returned image data is in base64 encoded format (`b64_json`)
+- Content safety filtering levels can be configured via `geminiSafetySetting`
+- If you need model mapping (e.g., mapping `dall-e-3` to a Gemini model), configure `modelMapping`
+
 ### Utilizing OpenAI Protocol Proxy for AWS Bedrock Services
+
+For Bedrock, `/v1/chat/completions` continues to be converted to the Bedrock Runtime Converse API. `/v1/messages` is forwarded directly to the Bedrock Mantle Anthropic Messages API: `https://bedrock-mantle.{awsRegion}.api.aws/anthropic/v1/messages`. The request body, response body, and streaming SSE keep the native Anthropic format; the plugin only applies model mapping and authentication handling. When `apiTokens` are used with Mantle, the plugin sends the token in the `x-api-key` request header.
 
 AWS Bedrock supports two authentication methods:
 
@@ -2042,6 +2217,93 @@ providers:
     "model": "gpt2",
 }
 ```
+
+### Using Context Cleanup Commands
+
+After configuring context cleanup commands, users can actively clear conversation history by sending specific messages, achieving a "start over" effect.
+
+**Configuration**
+
+```yaml
+provider:
+  type: qwen
+  apiTokens:
+    - "YOUR_QWEN_API_TOKEN"
+  modelMapping:
+    "*": "qwen-turbo"
+  contextCleanupCommands:
+    - "clear context"
+    - "/clear"
+    - "start over"
+    - "new conversation"
+```
+
+**Request Example**
+
+When a user sends a request containing a cleanup command:
+
+```json
+{
+  "model": "gpt-3",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are an assistant"
+    },
+    {
+      "role": "user",
+      "content": "Hello"
+    },
+    {
+      "role": "assistant",
+      "content": "Hello! How can I help you?"
+    },
+    {
+      "role": "user",
+      "content": "What's the weather like today"
+    },
+    {
+      "role": "assistant",
+      "content": "Sorry, I cannot get real-time weather information."
+    },
+    {
+      "role": "user",
+      "content": "clear context"
+    },
+    {
+      "role": "user",
+      "content": "Let's start a new topic, introduce yourself"
+    }
+  ]
+}
+```
+
+**Actual Request Sent to AI Service**
+
+The plugin automatically removes the cleanup command and all non-system messages before it:
+
+```json
+{
+  "model": "qwen-turbo",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are an assistant"
+    },
+    {
+      "role": "user",
+      "content": "Let's start a new topic, introduce yourself"
+    }
+  ]
+}
+```
+
+**Notes**
+
+- The cleanup command must exactly match the configured string; partial matches will not trigger cleanup
+- When multiple cleanup commands exist in messages, only the last matching command is processed
+- Cleanup preserves all system messages and removes user, assistant, and tool messages before the command
+- All messages after the cleanup command are preserved
 
 ## Full Configuration Example
 

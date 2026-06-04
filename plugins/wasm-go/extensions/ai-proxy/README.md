@@ -26,6 +26,8 @@ description: AI 代理插件配置参考
 
 > 请求路径后缀匹配 `/v1/embeddings` 时，对应文本向量场景，会用 OpenAI 的文本向量协议解析请求 Body，再转换为对应 LLM 厂商的文本向量协议
 
+> 请求路径后缀匹配 `/v1/images/generations` 时，对应文生图场景，会用 OpenAI 的图片生成协议解析请求 Body，再转换为对应 LLM 厂商的图片生成协议
+
 ## 运行属性
 
 插件执行阶段：`默认阶段`
@@ -50,11 +52,13 @@ description: AI 代理插件配置参考
 | `protocol`             | string                 | 非必填   | -      | 插件对外提供的 API 接口契约。目前支持以下取值：openai（默认值，使用 OpenAI 的接口契约）、original（使用目标服务提供商的原始接口契约）                                                                                                                                                                                                                                                                                                      |
 | `context`              | object                 | 非必填   | -      | 配置 AI 对话上下文信息                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `customSettings`       | array of customSetting | 非必填   | -      | 为 AI 请求指定覆盖或者填充参数                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `failover`             | object                 | 非必填   | -      | 配置 apiToken 的 failover 策略，当 apiToken 不可用时，将其移出 apiToken 列表，待健康检测通过后重新添加回 apiToken 列表                                                                                                                                                                                                                                                                                                                     |
+| `failover`             | object                 | 非必填   | -      | 配置 apiToken 的 failover 策略，当 apiToken 不可用时，将其移出 apiToken 列表，待健康检测通过或冷却时间到期后重新添加回 apiToken 列表                                                                                                                                                                                                                                                                                                       |
 | `retryOnFailure`       | object                 | 非必填   | -      | 当请求失败时立即进行重试                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `reasoningContentMode` | string                 | 非必填   | -      | 如何处理大模型服务返回的推理内容。目前支持以下取值：passthrough（正常输出推理内容）、ignore（不输出推理内容）、concat（将推理内容拼接在常规输出内容之前）。默认为 passthrough。仅支持通义千问服务。                                                                                                                                                                                                                                        |
 | `capabilities`         | map of string          | 非必填   | -      | 部分 provider 的部分 ai 能力原生兼容 openai/v1 格式，不需要重写，可以直接转发，通过此配置项指定来开启转发, key 表示的是采用的厂商协议能力，values 表示的真实的厂商该能力的 api path, 厂商协议能力当前支持: openai/v1/chatcompletions, openai/v1/embeddings, openai/v1/imagegeneration, openai/v1/audiospeech, cohere/v1/rerank                                                                                                             |
-| `subPath`              | string                 | 非必填   | -      | 如果配置了subPath，将会先移除请求path中该前缀，再进行后续处理                                                                                                                                                                                                                                                                                                                                                                              |
+| `basePath`             | string                 | 非必填   | -      | 如果配置了 basePath，可用于在请求 path 中移除该前缀，或添加至请求 path 中，默认为进行移除                                                                                                                                                                                                                                                                                                                                                 |
+| `basePathHandling`     | string                 | 非必填   | removePrefix | basePathHandling 用于指定 basePath 的处理方式。可选值：removePrefix（移除路径前缀，将请求转发给上游时去除 basePath 前缀后再拼接）、prepend（添加路径前缀，将请求转发给上游时在路径前面添加 basePath 前缀）                                                                                                                                                                                                                                                                                                                         |
+| `contextCleanupCommands` | array of string      | 非必填   | -      | 上下文清理命令列表。当请求的 messages 中存在完全匹配任意一个命令的 user 消息时，将该消息及之前所有非 system 消息清理掉，只保留 system 消息和该命令之后的消息。可用于主动清理对话上下文。                                                                                                                                                                                                                                                    |
 
 `context`的配置字段说明如下：
 
@@ -89,15 +93,18 @@ custom-setting 会遵循如下表格，根据`name`和协议来替换对应的�
 
 `failover` 的配置字段说明如下：
 
-| 名称                | 数据类型        | 填写要求             | 默认值         | 描述                                                     |
-| ------------------- | --------------- | -------------------- | -------------- | -------------------------------------------------------- |
-| enabled             | bool            | 非必填               | false          | 是否启用 apiToken 的 failover 机制                       |
-| failureThreshold    | int             | 非必填               | 3              | 触发 failover 连续请求失败的阈值（次数）                 |
-| successThreshold    | int             | 非必填               | 1              | 健康检测的成功阈值（次数）                               |
-| healthCheckInterval | int             | 非必填               | 5000           | 健康检测的间隔时间，单位毫秒                             |
-| healthCheckTimeout  | int             | 非必填               | 5000           | 健康检测的超时时间，单位毫秒                             |
-| healthCheckModel    | string          | 启用 failover 时必填 |                | 健康检测使用的模型                                       |
-| failoverOnStatus    | array of string | 非必填               | ["4.*", "5.*"] | 需要进行 failover 的原始请求的状态码，支持正则表达式匹配 |
+| 名称                | 数据类型        | 填写要求                                  | 默认值         | 描述                                                                 |
+| ------------------- | --------------- | ----------------------------------------- | -------------- | -------------------------------------------------------------------- |
+| enabled             | bool            | 非必填                                    | false          | 是否启用 apiToken 的 failover 机制                                   |
+| failureThreshold    | int             | 非必填                                    | 3              | 触发 failover 连续请求失败的阈值（次数）                             |
+| successThreshold    | int             | 非必填                                    | 1              | 健康检测的成功阈值（次数）                                           |
+| healthCheckInterval | int             | 非必填                                    | 5000           | 健康检测的间隔时间，单位毫秒                                         |
+| healthCheckTimeout  | int             | 非必填                                    | 5000           | 健康检测的超时时间，单位毫秒                                         |
+| healthCheckModel    | string          | 启用 failover 时与 cooldownDuration 二选一 | -              | 健康检测使用的模型。配置后会通过健康检测恢复不可用的 apiToken        |
+| cooldownDuration    | int             | 启用 failover 时与 healthCheckModel 二选一 | 0              | apiToken 不可用后的冷却恢复时间，单位毫秒。大于 0 时冷却到期自动恢复 |
+| failoverOnStatus    | array of string | 非必填                                    | ["4.*", "5.*"] | 需要进行 failover 的原始请求的状态码，支持正则表达式匹配             |
+
+`healthCheckModel` 和 `cooldownDuration` 至少需要配置一个。当两者同时配置时，apiToken 可通过健康检测提前恢复，也会在冷却时间到期后自动恢复。
 
 `retryOnFailure` 的配置字段说明如下：
 
@@ -125,18 +132,20 @@ OpenAI 所对应的 `type` 为 `openai`。它特有的配置字段如下:
 
 Azure OpenAI 所对应的 `type` 为 `azure`。它特有的配置字段如下：
 
-| 名称              | 数据类型 | 填写要求 | 默认值 | 描述                                                     |
-| ----------------- | -------- | -------- | ------ | -------------------------------------------------------- |
-| `azureServiceUrl` | string   | 必填     | -      | Azure OpenAI 服务的 URL，须包含 `api-version` 查询参数。 |
+| 名称              | 数据类型 | 填写要求 | 默认值 | 描述                                                                                                   |
+| ----------------- | -------- | -------- | ------ | ------------------------------------------------------------------------------------------------------ |
+| `azureServiceUrl` | string   | 必填     | -      | Azure OpenAI 服务的 URL。`/openai/v1` 新版路径无需日期型 `api-version`；legacy 路径或仅资源名称模式仍须包含。 |
 
 **注意：**
 1. Azure OpenAI 只支持配置一个 API Token。
-2. `azureServiceUrl` 支持以下三种配置格式：
-   1. 完整路径格式，例如：`https://YOUR_RESOURCE_NAME.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT_NAME/chat/completions?api-version=2024-02-15-preview`
+2. `azureServiceUrl` 支持新版 `/openai/v1` 和 legacy 配置格式：
+   1. 新版 v1 格式，例如：`https://YOUR_RESOURCE_NAME.openai.azure.com/openai/v1`
+      - 插件会直接使用该 v1 base URL，且不会自动追加日期型 `api-version`。
+   2. Legacy 完整路径格式，例如：`https://YOUR_RESOURCE_NAME.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT_NAME/chat/completions?api-version=2024-02-15-preview`
       - 插件会直接将请求转发至该 URL，不会参考实际的请求路径。
-   2. 部署名称格式，例如：`https://YOUR_RESOURCE_NAME.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT_NAME?api-version=2024-02-15-preview`
+   3. Legacy 部署名称格式，例如：`https://YOUR_RESOURCE_NAME.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT_NAME?api-version=2024-02-15-preview`
       - 插件会根据实际的请求路径拼接后续路径。路径中的部署名称会保留不变，不会按照模型映射规则进行修改。同时支持 URL 中不包含部署名称的接口。
-   3. 资源名称格式，例如：`https://YOUR_RESOURCE_NAME.openai.azure.com?api-version=2024-02-15-preview` 
+   4. Legacy 资源名称格式，例如：`https://YOUR_RESOURCE_NAME.openai.azure.com?api-version=2024-02-15-preview`
       - 插件会根据实际的请求路径拼接后续路径。路径中的部署名称会根据请求中的模型名称结合模型映射规则进行填入。同时支持 URL 中不包含部署名称的接口。
 
 #### 月之暗面（Moonshot）
@@ -221,6 +230,17 @@ Anthropic Claude 所对应的 `type` 为 `claude`。它特有的配置字段如�
 | 名称            | 数据类型 | 填写要求 | 默认值 | 描述                                      |
 | --------------- | -------- | -------- | ------ | ----------------------------------------- |
 | `claudeVersion` | string   | 可选     | -      | Claude 服务的 API 版本，默认为 2023-06-01 |
+| `claudeCodeMode` | boolean | 可选     | false  | 启用 Claude Code 模式，用于支持 Claude Code OAuth 令牌认证。启用后将伪装成 Claude Code 客户端发起请求 |
+
+**Claude Code 模式说明**
+
+启用 `claudeCodeMode: true` 时，插件将：
+- 使用 Bearer Token 认证替代 x-api-key（适配 Claude Code OAuth 令牌）
+- 设置 Claude Code 特定的请求头（user-agent、x-app、anthropic-beta）
+- 为请求 URL 添加 `?beta=true` 查询参数
+- 自动注入 Claude Code 的系统提示词（如未提供）
+
+这允许在 Higress 中直接使用 Claude Code 的 OAuth Token 进行身份验证。
 
 #### Ollama
 
@@ -386,7 +406,7 @@ provider:
   type: azure
   apiTokens:
     - "YOUR_AZURE_OPENAI_API_TOKEN"
-  azureServiceUrl: "https://YOUR_RESOURCE_NAME.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT_NAME/chat/completions?api-version=2024-02-15-preview",
+  azureServiceUrl: "https://YOUR_RESOURCE_NAME.openai.azure.com/openai/v1",
 ```
 
 **请求示例**
@@ -1207,6 +1227,44 @@ URL: `http://your-domain/v1/messages`
   }
 }
 ```
+
+### 使用 Claude Code 模式
+
+Claude Code 是 Anthropic 提供的官方 CLI 工具。通过启用 `claudeCodeMode`，可以使用 Claude Code 的 OAuth Token 进行身份验证：
+
+**配置信息**
+
+```yaml
+provider:
+  type: claude
+  apiTokens:
+    - 'sk-ant-oat01-xxxxx'  # Claude Code OAuth Token
+  claudeCodeMode: true  # 启用 Claude Code 模式
+```
+
+启用此模式后，插件将自动：
+- 使用 Bearer Token 认证（而非 x-api-key）
+- 设置 Claude Code 特定的请求头和查询参数
+- 注入 Claude Code 的系统提示词（如未提供）
+
+**请求示例**
+
+```json
+{
+  "model": "claude-sonnet-4-5-20250929",
+  "max_tokens": 8192,
+  "messages": [
+    {
+      "role": "user",
+      "content": "List files in current directory"
+    }
+  ]
+}
+```
+
+插件将自动转换为适合 Claude Code 的请求格式，包括：
+- 添加系统提示词：`"You are Claude Code, Anthropic's official CLI for Claude."`
+- 设置适当的认证和请求头
 
 ### 使用智能协议转换
 
@@ -2164,7 +2222,111 @@ provider:
 }
 ```
 
+### 使用 OpenAI 协议代理 Google Vertex 图片生成服务
+
+Vertex AI 支持使用 Gemini 模型进行图片生成。通过 ai-proxy 插件，可以使用 OpenAI 的 `/v1/images/generations` 接口协议来调用 Vertex AI 的图片生成能力。
+
+**配置信息**
+
+```yaml
+provider:
+  type: vertex
+  apiTokens:
+    - "YOUR_API_KEY"
+  modelMapping:
+    "dall-e-3": "gemini-2.0-flash-exp"
+  geminiSafetySetting:
+    HARM_CATEGORY_HARASSMENT: "OFF"
+    HARM_CATEGORY_HATE_SPEECH: "OFF"
+    HARM_CATEGORY_SEXUALLY_EXPLICIT: "OFF"
+    HARM_CATEGORY_DANGEROUS_CONTENT: "OFF"
+```
+
+**使用 curl 请求**
+
+```bash
+curl -X POST "http://your-gateway-address/v1/images/generations" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-2.0-flash-exp",
+    "prompt": "一只可爱的橘猫在阳光下打盹",
+    "size": "1024x1024"
+  }'
+```
+
+**使用 OpenAI Python SDK**
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="any-value",  # 可以是任意值，认证由网关处理
+    base_url="http://your-gateway-address/v1"
+)
+
+response = client.images.generate(
+    model="gemini-2.0-flash-exp",
+    prompt="一只可爱的橘猫在阳光下打盹",
+    size="1024x1024",
+    n=1
+)
+
+# 获取生成的图片（base64 编码）
+image_data = response.data[0].b64_json
+print(f"Generated image (base64): {image_data[:100]}...")
+```
+
+**响应示例**
+
+```json
+{
+  "created": 1729986750,
+  "data": [
+    {
+      "b64_json": "iVBORw0KGgoAAAANSUhEUgAABAAAAAQACAIAAADwf7zUAAAA..."
+    }
+  ],
+  "usage": {
+    "total_tokens": 1356,
+    "input_tokens": 13,
+    "output_tokens": 1120
+  }
+}
+```
+
+**支持的尺寸参数**
+
+Vertex AI 支持的宽高比（aspectRatio）：`1:1`、`3:2`、`2:3`、`3:4`、`4:3`、`4:5`、`5:4`、`9:16`、`16:9`、`21:9`
+
+Vertex AI 支持的分辨率（imageSize）：`1k`、`2k`、`4k`
+
+| OpenAI size 参数 | Vertex AI aspectRatio | Vertex AI imageSize |
+|------------------|----------------------|---------------------|
+| 256x256          | 1:1                  | 1k                  |
+| 512x512          | 1:1                  | 1k                  |
+| 1024x1024        | 1:1                  | 1k                  |
+| 1792x1024        | 16:9                 | 2k                  |
+| 1024x1792        | 9:16                 | 2k                  |
+| 2048x2048        | 1:1                  | 2k                  |
+| 4096x4096        | 1:1                  | 4k                  |
+| 1536x1024        | 3:2                  | 2k                  |
+| 1024x1536        | 2:3                  | 2k                  |
+| 1024x768         | 4:3                  | 1k                  |
+| 768x1024         | 3:4                  | 1k                  |
+| 1280x1024        | 5:4                  | 1k                  |
+| 1024x1280        | 4:5                  | 1k                  |
+| 2560x1080        | 21:9                 | 2k                  |
+
+**注意事项**
+
+- 图片生成使用 Gemini 模型（如 `gemini-2.0-flash-exp`、`gemini-3-pro-image-preview`），不同模型的可用性可能因区域而异
+- 返回的图片数据为 base64 编码格式（`b64_json`）
+- 可以通过 `geminiSafetySetting` 配置内容安全过滤级别
+- 如果需要使用模型映射（如将 `dall-e-3` 映射到 Gemini 模型），可以配置 `modelMapping`
+
 ### 使用 OpenAI 协议代理 AWS Bedrock 服务
+
+对于 Bedrock，`/v1/chat/completions` 会继续转换为 Bedrock Runtime Converse API；`/v1/messages` 会直接转发到 Bedrock Mantle 的 Anthropic Messages API：`https://bedrock-mantle.{awsRegion}.api.aws/anthropic/v1/messages`，请求体、响应体和流式 SSE 都保持 Anthropic 原生格式，仅执行模型映射和认证处理。使用 `apiTokens` 访问 Mantle 时，插件会写入 `x-api-key` 请求头。
 
 AWS Bedrock 支持两种认证方式：
 
@@ -2285,11 +2447,92 @@ providers:
 }
 ```
 
+### 使用上下文清理命令
 
+配置上下文清理命令后，用户可以通过发送特定消息来主动清理对话历史，实现"重新开始对话"的效果。
 
+**配置信息**
 
+```yaml
+provider:
+  type: qwen
+  apiTokens:
+    - "YOUR_QWEN_API_TOKEN"
+  modelMapping:
+    "*": "qwen-turbo"
+  contextCleanupCommands:
+    - "清理上下文"
+    - "/clear"
+    - "重新开始"
+    - "新对话"
+```
 
+**请求示例**
 
+当用户发送包含清理命令的请求时：
+
+```json
+{
+  "model": "gpt-3",
+  "messages": [
+    {
+      "role": "system",
+      "content": "你是一个助手"
+    },
+    {
+      "role": "user",
+      "content": "你好"
+    },
+    {
+      "role": "assistant",
+      "content": "你好！有什么可以帮助你的？"
+    },
+    {
+      "role": "user",
+      "content": "今天天气怎么样"
+    },
+    {
+      "role": "assistant",
+      "content": "抱歉，我无法获取实时天气信息。"
+    },
+    {
+      "role": "user",
+      "content": "清理上下文"
+    },
+    {
+      "role": "user",
+      "content": "现在开始新话题，介绍一下你自己"
+    }
+  ]
+}
+```
+
+**实际发送给 AI 服务的请求**
+
+插件会自动清理"清理上下文"命令及之前的所有非 system 消息：
+
+```json
+{
+  "model": "qwen-turbo",
+  "messages": [
+    {
+      "role": "system",
+      "content": "你是一个助手"
+    },
+    {
+      "role": "user",
+      "content": "现在开始新话题，介绍一下你自己"
+    }
+  ]
+}
+```
+
+**说明**
+
+- 清理命令必须完全匹配配置的字符串，部分匹配不会触发清理
+- 当存在多个清理命令时，只处理最后一个匹配的命令
+- 清理会保留所有 system 消息，删除命令及之前的 user、assistant、tool 消息
+- 清理命令之后的所有消息都会保留
 
 ## 完整配置示例
 

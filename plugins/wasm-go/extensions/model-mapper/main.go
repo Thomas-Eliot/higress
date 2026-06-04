@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"sort"
 	"strings"
@@ -41,12 +42,18 @@ type Config struct {
 	prefixModelMapping []ModelMapping
 	defaultModel       string
 	enableOnPathSuffix []string
+	modelToHeader      string
 }
 
 func parseConfig(json gjson.Result, config *Config) error {
 	config.modelKey = json.Get("modelKey").String()
 	if config.modelKey == "" {
 		config.modelKey = "model"
+	}
+
+	config.modelToHeader = json.Get("modelToHeader").String()
+	if config.modelToHeader == "" {
+		config.modelToHeader = "x-higress-llm-model-final"
 	}
 
 	modelMapping := json.Get("modelMapping")
@@ -111,6 +118,7 @@ func parseConfig(json gjson.Result, config *Config) error {
 			"/video-synthesis",
 			"/rerank",
 			"/messages",
+			"/responses",
 		}
 	}
 
@@ -136,15 +144,14 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config Config) types.Action {
 			break
 		}
 	}
-	if !matched {
-		return types.ActionContinue
-	}
 
-	if !ctx.HasRequestBody() {
+	if !matched || !ctx.HasRequestBody() {
 		ctx.DontReadRequestBody()
 		return types.ActionContinue
 	}
 
+	// Disable re-route since the plugin may modify some headers related to the chosen route.
+	ctx.DisableReroute()
 	// Prepare for body processing
 	proxywasm.RemoveHttpRequestHeader("content-length")
 	// 100MB buffer limit
@@ -155,6 +162,11 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config Config) types.Action {
 
 func onHttpRequestBody(ctx wrapper.HttpContext, config Config, body []byte) types.Action {
 	if len(body) == 0 {
+		return types.ActionContinue
+	}
+
+	if !json.Valid(body) {
+		log.Error("invalid json body")
 		return types.ActionContinue
 	}
 
@@ -178,6 +190,9 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config Config, body []byte) type
 		}
 	}
 
+	// update x-higress-llm-model-final header
+	proxywasm.ReplaceHttpRequestHeader(config.modelToHeader, newModel)
+	log.Debugf("set header %s: %s", config.modelToHeader, newModel)
 	if newModel != "" && newModel != oldModel {
 		newBody, err := sjson.SetBytes(body, config.modelKey, newModel)
 		if err != nil {

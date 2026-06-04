@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-proxy/config"
@@ -25,11 +26,14 @@ import (
 const (
 	pluginName = "ai-proxy"
 
-	defaultMaxBodyBytes uint32 = 100 * 1024 * 1024
+	defaultMaxBodyBytes             uint32 = 100 * 1024 * 1024
+	errorResponseBodyBufferLimit    uint32 = 64 * 1024
+	maxLoggedErrorResponseBodyBytes        = 16 * 1024
 
-	ctxOriginalPath = "original_path"
-	ctxOriginalHost = "original_host"
-	ctxOriginalAuth = "original_auth"
+	ctxOriginalPath                = "original_path"
+	ctxOriginalHost                = "original_host"
+	ctxOriginalAuth                = "original_auth"
+	ctxUpstreamErrorResponseStatus = "upstream_error_response_status"
 )
 
 type pair[K, V any] struct {
@@ -52,6 +56,9 @@ var (
 		{provider.PathOpenAICompletions, provider.ApiNameCompletion},
 		{provider.PathOpenAIEmbeddings, provider.ApiNameEmbeddings},
 		{provider.PathOpenAIAudioSpeech, provider.ApiNameAudioSpeech},
+		{provider.PathOpenAIAudioTranscriptions, provider.ApiNameAudioTranscription},
+		{provider.PathOpenAIAudioTranslations, provider.ApiNameAudioTranslation},
+		{provider.PathOpenAIRealtime, provider.ApiNameRealtime},
 		{provider.PathOpenAIImageGeneration, provider.ApiNameImageGeneration},
 		{provider.PathOpenAIImageVariation, provider.ApiNameImageVariation},
 		{provider.PathOpenAIImageEdit, provider.ApiNameImageEdit},
@@ -66,6 +73,9 @@ var (
 		{provider.PathAnthropicComplete, provider.ApiNameAnthropicComplete},
 		// Cohere style
 		{provider.PathCohereV1Rerank, provider.ApiNameCohereV1Rerank},
+		// Qwen style
+		{provider.PathQwenV1Reranks, provider.ApiNameQwenV1Rerank},
+		{provider.PathQwenV1Conversations, provider.ApiNameQwenV1Conversations},
 	}
 	pathPatternToApiName = []pair[*regexp.Regexp, provider.ApiName]{
 		// OpenAI style
@@ -148,10 +158,38 @@ func initContext(ctx wrapper.HttpContext) {
 	for _, originHeader := range headerToOriginalHeaderMapping {
 		_ = proxywasm.RemoveHttpRequestHeader(originHeader)
 	}
-	originalAuth, _ := proxywasm.GetHttpRequestHeader(util.HeaderOriginalAuth)
-	if originalAuth == "" {
+
+	// Distinguish "first hop into this gateway" from "internal_redirect re-entry".
+	//
+	// Signal: x-higress-fallback-from. It is set by Envoy custom_response's
+	// RedirectPolicy on every internal_redirect within this gateway, and it
+	// survives mutateRequestHeaders on the redirected stream (it is NOT in
+	// Envoy's hardcoded strip list).
+	//
+	// Absence  => first hop. Distrust any incoming X-HI-ORIGINAL-AUTH — it may
+	//             have been set by a client or by an upstream cascaded gateway
+	//             running its own ai-proxy. Re-anchor the saved value from the
+	//             request's current Authorization, which is what this gateway
+	//             should treat as the "original" credential for later
+	//             internal_redirect hops.
+	// Presence => internal_redirect re-entry within this gateway. Leave
+	//             X-HI-ORIGINAL-AUTH alone — it preserves the value this gateway's
+	//             ai-proxy wrote on the previous pass, which key-auth needs for
+	//             re-authentication after Authorization has been replaced with
+	//             the upstream apiToken.
+	//
+	// SAFETY DEPENDENCY: this signal is reliable only when external callers
+	// cannot supply x-higress-fallback-from. For cascaded deployments where an
+	// upstream gateway may itself be in an internal_redirect chain when forwarding
+	// to this gateway, list x-higress-fallback-from (and x-hi-original-auth) in
+	// the HCM internal_only_headers as defense-in-depth.
+	fallbackFrom, _ := proxywasm.GetHttpRequestHeader(util.HeaderHigressFallbackFrom)
+	if fallbackFrom == "" {
+		_ = proxywasm.RemoveHttpRequestHeader(util.HeaderOriginalAuth)
 		value, _ := proxywasm.GetHttpRequestHeader(util.HeaderAuthorization)
-		ctx.SetContext(ctxOriginalAuth, value)
+		if value != "" {
+			ctx.SetContext(ctxOriginalAuth, value)
+		}
 	}
 }
 
@@ -225,9 +263,9 @@ func onHttpRequestHeader(ctx wrapper.HttpContext, pluginConfig config.PluginConf
 		}
 	}
 
-	if contentType, _ := proxywasm.GetHttpRequestHeader(util.HeaderContentType); contentType != "" && !strings.Contains(contentType, util.MimeTypeApplicationJson) {
+	if contentType, _ := proxywasm.GetHttpRequestHeader(util.HeaderContentType); contentType != "" && !isSupportedRequestContentType(apiName, contentType) {
 		ctx.DontReadRequestBody()
-		log.Debugf("[onHttpRequestHeader] unsupported content type: %s, will not process the request body", contentType)
+		log.Debugf("[onHttpRequestHeader] unsupported content type for api %s: %s, will not process the request body", apiName, contentType)
 	}
 
 	if apiName == "" {
@@ -258,8 +296,9 @@ func onHttpRequestHeader(ctx wrapper.HttpContext, pluginConfig config.PluginConf
 			return types.ActionContinue
 		}
 
+		_, hasRequestBodyHandler := activeProvider.(provider.RequestBodyHandler)
 		hasRequestBody := ctx.HasRequestBody()
-		if hasRequestBody {
+		if hasRequestBody && hasRequestBodyHandler {
 			_ = proxywasm.RemoveHttpRequestHeader("Content-Length")
 			ctx.SetRequestBodyBufferLimit(defaultMaxBodyBytes)
 			// Delay the header processing to allow changing in OnRequestBody
@@ -297,7 +336,8 @@ func onHttpRequestBody(ctx wrapper.HttpContext, pluginConfig config.PluginConfig
 			log.Errorf("failed to replace request body by custom settings: %v", settingErr)
 		}
 		// 仅 /v1/chat/completions 和 /v1/completions 接口支持 stream_options 参数
-		if providerConfig.IsOpenAIProtocol() && (apiName == provider.ApiNameChatCompletion || apiName == provider.ApiNameCompletion) {
+		// generic provider 不做能力映射，不添加 stream_options
+		if providerConfig.IsOpenAIProtocol() && !providerConfig.IsGeneric() && (apiName == provider.ApiNameChatCompletion || apiName == provider.ApiNameCompletion) {
 			newBody = normalizeOpenAiRequestBody(newBody)
 		}
 		log.Debugf("[onHttpRequestBody] newBody=%s", newBody)
@@ -306,6 +346,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, pluginConfig config.PluginConfig
 		if err == nil {
 			return action
 		}
+		log.Errorf("[onHttpRequestBody] failed to process request body, apiName=%s, err=%v", apiName, err)
 		_ = util.ErrorHandler("ai-proxy.proc_req_body_failed", fmt.Errorf("failed to process request body: %v", err))
 	}
 	return types.ActionContinue
@@ -337,8 +378,17 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, pluginConfig config.PluginCo
 		if err != nil {
 			log.Errorf("unable to load :status header from response: %v", err)
 		}
+		action := providerConfig.OnRequestFailed(activeProvider, ctx, apiTokenInUse, apiTokens, status)
+		if action == types.ActionContinue &&
+			providerConfig.GetLogUpstreamErrorResponseBody() &&
+			shouldLogUpstreamErrorResponse(status) {
+			ctx.SetContext(ctxUpstreamErrorResponseStatus, status)
+			ctx.BufferResponseBody()
+			ctx.SetResponseBodyBufferLimit(errorResponseBodyBufferLimit)
+			return action
+		}
 		ctx.DontReadResponseBody()
-		return providerConfig.OnRequestFailed(activeProvider, ctx, apiTokenInUse, apiTokens, status)
+		return action
 	}
 
 	// Reset ctxApiTokenRequestFailureCount if the request is successful,
@@ -381,6 +431,8 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, pluginConfig config.Plugin
 		return chunk
 	}
 
+	promoteThinking := pluginConfig.GetProviderConfig().GetPromoteThinkingOnEmpty()
+
 	log.Debugf("[onStreamingResponseBody] provider=%s", activeProvider.GetProviderType())
 	log.Debugf("[onStreamingResponseBody] isLastChunk=%v chunk: %s", isLastChunk, string(chunk))
 
@@ -388,6 +440,9 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, pluginConfig config.Plugin
 		apiName, _ := ctx.GetContext(provider.CtxKeyApiName).(provider.ApiName)
 		modifiedChunk, err := handler.OnStreamingResponseBody(ctx, apiName, chunk, isLastChunk)
 		if err == nil && modifiedChunk != nil {
+			if promoteThinking {
+				modifiedChunk = promoteThinkingInStreamingChunk(ctx, modifiedChunk, isLastChunk)
+			}
 			// Convert to Claude format if needed
 			claudeChunk, convertErr := convertStreamingResponseToClaude(ctx, modifiedChunk)
 			if convertErr != nil {
@@ -431,6 +486,10 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, pluginConfig config.Plugin
 
 		result := []byte(responseBuilder.String())
 
+		if promoteThinking {
+			result = promoteThinkingInStreamingChunk(ctx, result, isLastChunk)
+		}
+
 		// Convert to Claude format if needed
 		claudeChunk, convertErr := convertStreamingResponseToClaude(ctx, result)
 		if convertErr != nil {
@@ -439,11 +498,12 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, pluginConfig config.Plugin
 		return claudeChunk
 	}
 
-	if !needsClaudeResponseConversion(ctx) {
+	if !needsClaudeResponseConversion(ctx) && !promoteThinking {
 		return chunk
 	}
 
 	// If provider doesn't implement any streaming handlers but we need Claude conversion
+	// or thinking promotion
 	// First extract complete events from the chunk
 	events := provider.ExtractStreamingEvents(ctx, chunk)
 	log.Debugf("[onStreamingResponseBody] %d events received (no handler)", len(events))
@@ -459,6 +519,10 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, pluginConfig config.Plugin
 	}
 
 	result := []byte(responseBuilder.String())
+
+	if promoteThinking {
+		result = promoteThinkingInStreamingChunk(ctx, result, isLastChunk)
+	}
 
 	// Convert to Claude format if needed
 	claudeChunk, convertErr := convertStreamingResponseToClaude(ctx, result)
@@ -478,6 +542,11 @@ func onHttpResponseBody(ctx wrapper.HttpContext, pluginConfig config.PluginConfi
 
 	log.Debugf("[onHttpResponseBody] provider=%s", activeProvider.GetProviderType())
 
+	if status := ctx.GetStringContext(ctxUpstreamErrorResponseStatus, ""); status != "" {
+		logUpstreamErrorResponse(ctx, activeProvider, status, body)
+		return types.ActionContinue
+	}
+
 	var finalBody []byte
 
 	if handler, ok := activeProvider.(provider.TransformResponseBodyHandler); ok {
@@ -492,6 +561,16 @@ func onHttpResponseBody(ctx wrapper.HttpContext, pluginConfig config.PluginConfi
 		finalBody = body
 	}
 
+	// Promote thinking/reasoning to content when content is empty
+	if pluginConfig.GetProviderConfig().GetPromoteThinkingOnEmpty() {
+		promoted, err := provider.PromoteThinkingOnEmptyResponse(finalBody)
+		if err != nil {
+			log.Warnf("[promoteThinkingOnEmpty] failed: %v", err)
+		} else {
+			finalBody = promoted
+		}
+	}
+
 	// Convert to Claude format if needed (applies to both branches)
 	convertedBody, err := convertResponseBodyToClaude(ctx, finalBody)
 	if err != nil {
@@ -503,6 +582,52 @@ func onHttpResponseBody(ctx wrapper.HttpContext, pluginConfig config.PluginConfi
 		_ = util.ErrorHandler("ai-proxy.replace_resp_body_failed", fmt.Errorf("failed to replace response body: %v", err))
 	}
 	return types.ActionContinue
+}
+
+func shouldLogUpstreamErrorResponse(status string) bool {
+	code, err := strconv.Atoi(status)
+	if err != nil {
+		return false
+	}
+	return code >= 400
+}
+
+func logUpstreamErrorResponse(ctx wrapper.HttpContext, activeProvider provider.Provider, status string, body []byte) {
+	apiName, _ := ctx.GetContext(provider.CtxKeyApiName).(provider.ApiName)
+	requestID := responseHeaderValue("x-request-id")
+	if requestID == "" {
+		requestID = responseHeaderValue("X-Request-Id")
+	}
+	bodyText, truncated := errorResponseBodyForLog(body)
+	log.Warnf("[upstream_error_response] provider=%s apiName=%s status=%s request_id=%s original_model=%s final_model=%s body_truncated=%v body=%s",
+		activeProvider.GetProviderType(),
+		apiName,
+		status,
+		requestID,
+		ctx.GetStringContext("originalRequestModel", ""),
+		ctx.GetStringContext("finalRequestModel", ""),
+		truncated,
+		bodyText,
+	)
+}
+
+func responseHeaderValue(name string) string {
+	value, err := proxywasm.GetHttpResponseHeader(name)
+	if err != nil {
+		return ""
+	}
+	return value
+}
+
+func errorResponseBodyForLog(body []byte) (string, bool) {
+	truncated := len(body) > maxLoggedErrorResponseBodyBytes
+	if truncated {
+		body = body[:maxLoggedErrorResponseBodyBytes]
+	}
+	text := strings.ToValidUTF8(string(body), "?")
+	text = strings.ReplaceAll(text, "\r", "\\r")
+	text = strings.ReplaceAll(text, "\n", "\\n")
+	return text, truncated
 }
 
 // Helper function to check if Claude response conversion is needed
@@ -538,6 +663,49 @@ func convertStreamingResponseToClaude(ctx wrapper.HttpContext, data []byte) ([]b
 		return data, err
 	}
 	return claudeChunk, nil
+}
+
+// promoteThinkingInStreamingChunk processes SSE-formatted streaming data, buffering
+// reasoning deltas and stripping them from chunks. On the last chunk, if no content
+// was ever seen, it appends a flush chunk that emits buffered reasoning as content.
+func promoteThinkingInStreamingChunk(ctx wrapper.HttpContext, data []byte, isLastChunk bool) []byte {
+	// SSE data contains lines like "data: {...}\n\n"
+	// We need to find and process each data line
+	lines := strings.Split(string(data), "\n")
+	modified := false
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" || payload == "" {
+			continue
+		}
+		stripped, err := provider.PromoteStreamingThinkingOnEmptyChunk(ctx, []byte(payload))
+		if err != nil {
+			continue
+		}
+		newLine := "data: " + string(stripped)
+		if newLine != line {
+			lines[i] = newLine
+			modified = true
+		}
+	}
+
+	result := data
+	if modified {
+		result = []byte(strings.Join(lines, "\n"))
+	}
+
+	// On last chunk, flush buffered reasoning as content if no content was seen
+	if isLastChunk {
+		flushChunk := provider.PromoteStreamingThinkingFlush(ctx)
+		if flushChunk != nil {
+			result = append(flushChunk, result...)
+		}
+	}
+
+	return result
 }
 
 // Helper function to convert OpenAI response body to Claude format
@@ -593,4 +761,15 @@ func getApiName(path string) provider.ApiName {
 	}
 
 	return ""
+}
+
+func isSupportedRequestContentType(apiName provider.ApiName, contentType string) bool {
+	if strings.Contains(contentType, util.MimeTypeApplicationJson) {
+		return true
+	}
+	contentType = strings.ToLower(contentType)
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		return apiName == provider.ApiNameImageEdit || apiName == provider.ApiNameImageVariation
+	}
+	return false
 }

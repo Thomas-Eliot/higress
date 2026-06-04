@@ -1,7 +1,11 @@
 package test
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
+	"mime"
+	"mime/multipart"
 	"strings"
 	"testing"
 
@@ -46,6 +50,40 @@ var azureFullPathConfig = func() json.RawMessage {
 	return data
 }()
 
+// 测试配置：Azure OpenAI v1 完整路径配置（无需 api-version）
+var azureV1FullPathConfigWithoutApiVersion = func() json.RawMessage {
+	data, _ := json.Marshal(map[string]interface{}{
+		"provider": map[string]interface{}{
+			"type": "azure",
+			"apiTokens": []string{
+				"sk-azure-v1",
+			},
+			"azureServiceUrl": "https://v1-resource.openai.azure.com/openai/v1/chat/completions",
+			"modelMapping": map[string]string{
+				"*": "gpt-4.1",
+			},
+		},
+	})
+	return data
+}()
+
+// 测试配置：Azure OpenAI v1 base_url 配置（无需 api-version）
+var azureV1BaseURLConfigWithoutApiVersion = func() json.RawMessage {
+	data, _ := json.Marshal(map[string]interface{}{
+		"provider": map[string]interface{}{
+			"type": "azure",
+			"apiTokens": []string{
+				"sk-azure-v1-base",
+			},
+			"azureServiceUrl": "https://v1-base-resource.openai.azure.com/openai/v1",
+			"modelMapping": map[string]string{
+				"*": "gpt-4.1",
+			},
+		},
+	})
+	return data
+}()
+
 // 测试配置：Azure OpenAI仅部署配置
 var azureDeploymentOnlyConfig = func() json.RawMessage {
 	data, _ := json.Marshal(map[string]interface{}{
@@ -80,6 +118,22 @@ var azureDomainOnlyConfig = func() json.RawMessage {
 	return data
 }()
 
+var azureDomainOnlyImageMultipartConfig = func() json.RawMessage {
+	data, _ := json.Marshal(map[string]interface{}{
+		"provider": map[string]interface{}{
+			"type": "azure",
+			"apiTokens": []string{
+				"sk-azure-image-multipart",
+			},
+			"azureServiceUrl": "https://domain-resource.openai.azure.com?api-version=2024-02-15-preview",
+			"modelMapping": map[string]string{
+				"gpt-image-1.5": "gpt-image-1",
+			},
+		},
+	})
+	return data
+}()
+
 // 测试配置：Azure OpenAI多模型配置
 var azureMultiModelConfig = func() json.RawMessage {
 	data, _ := json.Marshal(map[string]interface{}{
@@ -99,6 +153,74 @@ var azureMultiModelConfig = func() json.RawMessage {
 	return data
 }()
 
+func getMultipartTextField(body []byte, contentType string, fieldName string) (string, bool, error) {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return "", false, err
+	}
+	boundary := params["boundary"]
+	if boundary == "" {
+		return "", false, nil
+	}
+
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			return "", false, nil
+		}
+		if err != nil {
+			return "", false, err
+		}
+
+		data, err := io.ReadAll(part)
+		_ = part.Close()
+		if err != nil {
+			return "", false, err
+		}
+		if part.FormName() == fieldName {
+			return string(data), true, nil
+		}
+	}
+}
+
+func RunAzureMultipartHelperTests(t *testing.T) {
+	t.Run("multipart text field returns error for invalid content type", func(t *testing.T) {
+		_, _, err := getMultipartTextField([]byte("bad-body"), "multipart/form-data; boundary=\"", "model")
+		require.Error(t, err)
+	})
+
+	t.Run("multipart text field returns not found for missing boundary", func(t *testing.T) {
+		value, found, err := getMultipartTextField([]byte("bad-body"), "multipart/form-data", "model")
+		require.NoError(t, err)
+		require.False(t, found)
+		require.Equal(t, "", value)
+	})
+
+	t.Run("multipart text field returns not found on eof", func(t *testing.T) {
+		body, contentType := buildMultipartRequestBody(t, map[string]string{
+			"model": "gpt-image-1.5",
+		}, nil)
+
+		value, found, err := getMultipartTextField(body, contentType, "prompt")
+		require.NoError(t, err)
+		require.False(t, found)
+		require.Equal(t, "", value)
+	})
+
+	t.Run("multipart text field returns next part error on malformed body", func(t *testing.T) {
+		body := []byte("--abc\r\nnot-a-header\r\n\r\nvalue\r\n--abc--\r\n")
+		_, _, err := getMultipartTextField(body, "multipart/form-data; boundary=abc", "model")
+		require.Error(t, err)
+	})
+
+	t.Run("multipart text field returns read error on truncated part", func(t *testing.T) {
+		body := []byte("--abc\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nvalue\r\n--ab")
+		_, _, err := getMultipartTextField(body, "multipart/form-data; boundary=abc", "model")
+		require.Error(t, err)
+	})
+}
+
 // 测试配置：Azure OpenAI无效配置（缺少azureServiceUrl）
 var azureInvalidConfigMissingUrl = func() json.RawMessage {
 	data, _ := json.Marshal(map[string]interface{}{
@@ -115,7 +237,7 @@ var azureInvalidConfigMissingUrl = func() json.RawMessage {
 	return data
 }()
 
-// 测试配置：Azure OpenAI无效配置（缺少api-version）
+// 测试配置：Azure OpenAI legacy deployment 无效配置（缺少api-version）
 var azureInvalidConfigMissingApiVersion = func() json.RawMessage {
 	data, _ := json.Marshal(map[string]interface{}{
 		"provider": map[string]interface{}{
@@ -124,6 +246,23 @@ var azureInvalidConfigMissingApiVersion = func() json.RawMessage {
 				"sk-azure-invalid",
 			},
 			"azureServiceUrl": "https://invalid-resource.openai.azure.com/openai/deployments/invalid-deployment/chat/completions",
+			"modelMapping": map[string]string{
+				"*": "gpt-3.5-turbo",
+			},
+		},
+	})
+	return data
+}()
+
+// 测试配置：Azure OpenAI legacy domain-only 无效配置（缺少api-version）
+var azureInvalidDomainOnlyConfigMissingApiVersion = func() json.RawMessage {
+	data, _ := json.Marshal(map[string]interface{}{
+		"provider": map[string]interface{}{
+			"type": "azure",
+			"apiTokens": []string{
+				"sk-azure-invalid-domain",
+			},
+			"azureServiceUrl": "https://invalid-domain-resource.openai.azure.com",
 			"modelMapping": map[string]string{
 				"*": "gpt-3.5-turbo",
 			},
@@ -237,6 +376,28 @@ func RunAzureParseConfigTests(t *testing.T) {
 			require.NotNil(t, config)
 		})
 
+		// 测试Azure OpenAI v1完整路径配置解析（缺少api-version也应通过）
+		t.Run("azure v1 full path config without api version", func(t *testing.T) {
+			host, status := test.NewTestHost(azureV1FullPathConfigWithoutApiVersion)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			config, err := host.GetMatchConfig()
+			require.NoError(t, err)
+			require.NotNil(t, config)
+		})
+
+		// 测试Azure OpenAI v1 base_url配置解析（缺少api-version也应通过）
+		t.Run("azure v1 base url config without api version", func(t *testing.T) {
+			host, status := test.NewTestHost(azureV1BaseURLConfigWithoutApiVersion)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			config, err := host.GetMatchConfig()
+			require.NoError(t, err)
+			require.NotNil(t, config)
+		})
+
 		// 测试Azure OpenAI仅部署配置解析
 		t.Run("azure deployment only config", func(t *testing.T) {
 			host, status := test.NewTestHost(azureDeploymentOnlyConfig)
@@ -297,6 +458,14 @@ func RunAzureParseConfigTests(t *testing.T) {
 			require.Equal(t, types.OnPluginStartStatusFailed, status)
 		})
 
+		// 测试Azure OpenAI legacy domain-only无效配置（缺少api-version）
+		t.Run("azure invalid domain-only config missing api version", func(t *testing.T) {
+			host, status := test.NewTestHost(azureInvalidDomainOnlyConfigMissingApiVersion)
+			defer host.Reset()
+			// legacy domain-only 模式仍应失败，因为缺少api-version
+			require.Equal(t, types.OnPluginStartStatusFailed, status)
+		})
+
 		// 测试Azure OpenAI无效配置（缺少apiToken）
 		t.Run("azure invalid config missing token", func(t *testing.T) {
 			host, status := test.NewTestHost(azureInvalidConfigMissingToken)
@@ -343,7 +512,7 @@ func RunAzureOnHttpRequestHeadersTests(t *testing.T) {
 			// 验证Path是否被正确处理
 			pathValue, hasPath := test.GetHeaderValue(requestHeaders, ":path")
 			require.True(t, hasPath, "Path header should exist")
-			require.Contains(t, pathValue, "/openai/deployments/test-deployment/chat/completions", "Path should contain Azure deployment path")
+			require.Equal(t, "/openai/deployments/test-deployment/chat/completions?api-version=2024-02-15-preview", pathValue, "Path should equal Azure deployment path")
 
 			// 验证Content-Length是否被删除
 			_, hasContentLength := test.GetHeaderValue(requestHeaders, "Content-Length")
@@ -390,6 +559,60 @@ func RunAzureOnHttpRequestHeadersTests(t *testing.T) {
 			apiKeyValue, hasApiKey := test.GetHeaderValue(requestHeaders, "api-key")
 			require.True(t, hasApiKey, "api-key header should exist")
 			require.Equal(t, "sk-azure-fullpath", apiKeyValue, "api-key should contain Azure API token")
+		})
+
+		// 测试Azure OpenAI v1完整路径配置不拼接空query
+		t.Run("azure v1 full path request headers without trailing query", func(t *testing.T) {
+			host, status := test.NewTestHost(azureV1FullPathConfigWithoutApiVersion)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			action := host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{":path", "/v1/chat/completions"},
+				{":method", "POST"},
+				{"Content-Type", "application/json"},
+			})
+
+			require.Equal(t, types.HeaderStopIteration, action)
+
+			requestHeaders := host.GetRequestHeaders()
+			require.NotNil(t, requestHeaders)
+
+			hostValue, hasHost := test.GetHeaderValue(requestHeaders, ":authority")
+			require.True(t, hasHost, "Host header should exist")
+			require.Equal(t, "v1-resource.openai.azure.com", hostValue, "Host should be changed to Azure service domain")
+
+			pathValue, hasPath := test.GetHeaderValue(requestHeaders, ":path")
+			require.True(t, hasPath, "Path header should exist")
+			require.Equal(t, "/openai/v1/chat/completions", pathValue, "Path should not contain trailing empty query")
+		})
+
+		// 测试Azure OpenAI v1 base_url会继续拼接OpenAI capability path
+		t.Run("azure v1 base url request headers maps chat completions path", func(t *testing.T) {
+			host, status := test.NewTestHost(azureV1BaseURLConfigWithoutApiVersion)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			action := host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{":path", "/v1/chat/completions"},
+				{":method", "POST"},
+				{"Content-Type", "application/json"},
+			})
+
+			require.Equal(t, types.HeaderStopIteration, action)
+
+			requestHeaders := host.GetRequestHeaders()
+			require.NotNil(t, requestHeaders)
+
+			hostValue, hasHost := test.GetHeaderValue(requestHeaders, ":authority")
+			require.True(t, hasHost, "Host header should exist")
+			require.Equal(t, "v1-base-resource.openai.azure.com", hostValue, "Host should be changed to Azure service domain")
+
+			pathValue, hasPath := test.GetHeaderValue(requestHeaders, ":path")
+			require.True(t, hasPath, "Path header should exist")
+			require.Equal(t, "/openai/v1/chat/completions", pathValue, "Path should map OpenAI request path onto Azure v1 base URL")
 		})
 	})
 }
@@ -443,8 +666,40 @@ func RunAzureOnHttpRequestBodyTests(t *testing.T) {
 			requestHeaders := host.GetRequestHeaders()
 			pathValue, hasPath := test.GetHeaderValue(requestHeaders, ":path")
 			require.True(t, hasPath, "Path header should exist")
-			require.Contains(t, pathValue, "/openai/deployments/test-deployment/chat/completions", "Path should contain Azure deployment path")
-			require.Contains(t, pathValue, "api-version=2024-02-15-preview", "Path should contain API version")
+			require.Equal(t, pathValue, "/openai/deployments/test-deployment/chat/completions?api-version=2024-02-15-preview", "Path should contain Azure deployment path")
+		})
+
+		// 测试Azure OpenAI v1 base_url在Body阶段仍保持正确的capability path
+		t.Run("azure v1 base url request body maps chat completions path", func(t *testing.T) {
+			host, status := test.NewTestHost(azureV1BaseURLConfigWithoutApiVersion)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			action := host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{":path", "/v1/chat/completions"},
+				{":method", "POST"},
+				{"Content-Type", "application/json"},
+			})
+			require.Equal(t, types.HeaderStopIteration, action)
+
+			requestBody := `{
+				"model": "gpt-4.1",
+				"messages": [
+					{
+						"role": "user",
+						"content": "Hello from Azure v1"
+					}
+				]
+			}`
+
+			action = host.CallOnHttpRequestBody([]byte(requestBody))
+			require.Equal(t, types.ActionContinue, action)
+
+			requestHeaders := host.GetRequestHeaders()
+			pathValue, hasPath := test.GetHeaderValue(requestHeaders, ":path")
+			require.True(t, hasPath, "Path header should exist")
+			require.Equal(t, "/openai/v1/chat/completions", pathValue, "Path should keep Azure v1 capability path after body processing")
 		})
 
 		// 测试Azure OpenAI请求体处理（不同模型）
@@ -577,7 +832,7 @@ func RunAzureOnHttpRequestBodyTests(t *testing.T) {
 			requestHeaders := host.GetRequestHeaders()
 			pathValue, hasPath := test.GetHeaderValue(requestHeaders, ":path")
 			require.True(t, hasPath, "Path header should exist")
-			require.Contains(t, pathValue, "/openai/deployments/deployment-only/chat/completions", "Path should use default deployment")
+			require.Equal(t, pathValue, "/openai/deployments/deployment-only/chat/completions?api-version=2024-02-15-preview", "Path should use default deployment")
 		})
 
 		// 测试Azure OpenAI请求体处理（仅域名配置）
@@ -613,7 +868,157 @@ func RunAzureOnHttpRequestBodyTests(t *testing.T) {
 			requestHeaders := host.GetRequestHeaders()
 			pathValue, hasPath := test.GetHeaderValue(requestHeaders, ":path")
 			require.True(t, hasPath, "Path header should exist")
-			require.Contains(t, pathValue, "/openai/deployments/gpt-3.5-turbo/chat/completions", "Path should use model from request body")
+			require.Equal(t, pathValue, "/openai/deployments/gpt-3.5-turbo/chat/completions?api-version=2024-02-15-preview", "Path should use model from request body")
+		})
+
+		t.Run("azure domain only multipart image edit request body", func(t *testing.T) {
+			host, status := test.NewTestHost(azureDomainOnlyImageMultipartConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			body, contentType := buildMultipartRequestBody(t, map[string]string{
+				"model":  "gpt-image-1.5",
+				"prompt": "把小狗换成白色",
+				"size":   "1024x1024",
+				"n":      "1",
+			}, map[string][]byte{
+				"image[]": []byte("fake-image-content"),
+			})
+
+			action := host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{":path", "/v1/images/edits"},
+				{":method", "POST"},
+				{"Content-Type", contentType},
+			})
+			require.Equal(t, types.HeaderStopIteration, action)
+
+			action = host.CallOnHttpRequestBody(body)
+			require.Equal(t, types.ActionContinue, action)
+
+			transformedBody := host.GetRequestBody()
+			require.NotNil(t, transformedBody)
+
+			modelValue, found, err := getMultipartTextField(transformedBody, contentType, "model")
+			require.NoError(t, err)
+			require.True(t, found, "Model field should exist in multipart body")
+			require.Equal(t, "gpt-image-1", modelValue, "Model field should be mapped in multipart body")
+			require.Contains(t, string(transformedBody), "fake-image-content", "Image file content should remain in multipart body")
+
+			requestHeaders := host.GetRequestHeaders()
+			pathValue, hasPath := test.GetHeaderValue(requestHeaders, ":path")
+			require.True(t, hasPath, "Path header should exist")
+			require.Equal(t, "/openai/deployments/gpt-image-1/images/edits?api-version=2024-02-15-preview", pathValue, "Path should use mapped multipart model")
+
+			contentTypeValue, hasContentType := test.GetHeaderValue(requestHeaders, "Content-Type")
+			require.True(t, hasContentType, "Content-Type header should exist")
+			require.Equal(t, contentType, contentTypeValue, "Multipart Content-Type should remain unchanged")
+		})
+
+		t.Run("azure domain only multipart image variation request body", func(t *testing.T) {
+			host, status := test.NewTestHost(azureDomainOnlyImageMultipartConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			body, contentType := buildMultipartRequestBody(t, map[string]string{
+				"model":  "gpt-image-1.5",
+				"prompt": "生成类似风格",
+				"size":   "1024x1024",
+				"n":      "1",
+			}, map[string][]byte{
+				"image": []byte("fake-image-content"),
+			})
+
+			action := host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{":path", "/v1/images/variations"},
+				{":method", "POST"},
+				{"Content-Type", contentType},
+			})
+			require.Equal(t, types.HeaderStopIteration, action)
+
+			action = host.CallOnHttpRequestBody(body)
+			require.Equal(t, types.ActionContinue, action)
+
+			transformedBody := host.GetRequestBody()
+			require.NotNil(t, transformedBody)
+
+			modelValue, found, err := getMultipartTextField(transformedBody, contentType, "model")
+			require.NoError(t, err)
+			require.True(t, found, "Model field should exist in multipart body")
+			require.Equal(t, "gpt-image-1", modelValue, "Model field should be mapped in multipart body")
+			require.Contains(t, string(transformedBody), "fake-image-content", "Image file content should remain in multipart body")
+
+			requestHeaders := host.GetRequestHeaders()
+			pathValue, hasPath := test.GetHeaderValue(requestHeaders, ":path")
+			require.True(t, hasPath, "Path header should exist")
+			require.Equal(t, "/openai/deployments/gpt-image-1/images/variations?api-version=2024-02-15-preview", pathValue, "Path should use mapped multipart model")
+
+			contentTypeValue, hasContentType := test.GetHeaderValue(requestHeaders, "Content-Type")
+			require.True(t, hasContentType, "Content-Type header should exist")
+			require.Equal(t, contentType, contentTypeValue, "Multipart Content-Type should remain unchanged")
+		})
+
+		t.Run("azure domain only multipart malformed body logs transform failure", func(t *testing.T) {
+			host, status := test.NewTestHost(azureDomainOnlyImageMultipartConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			action := host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{":path", "/v1/images/edits"},
+				{":method", "POST"},
+				{"Content-Type", "multipart/form-data"},
+			})
+			require.Equal(t, types.HeaderStopIteration, action)
+
+			action = host.CallOnHttpRequestBody([]byte("bad-multipart-body"))
+			require.Equal(t, types.ActionContinue, action)
+
+			debugLogs := host.GetDebugLogs()
+			hasMultipartTransformFailureLog := false
+			for _, debugLog := range debugLogs {
+				if strings.Contains(debugLog, "[azure multipart] body transform failed") {
+					hasMultipartTransformFailureLog = true
+					break
+				}
+			}
+			require.True(t, hasMultipartTransformFailureLog, "Should log azure multipart transform failure")
+		})
+
+		// 测试Azure OpenAI模型无关请求处理（仅域名配置）
+		t.Run("azure domain only model independent", func(t *testing.T) {
+			host, status := test.NewTestHost(azureDomainOnlyConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			// 设置请求头
+			action := host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{":path", "/v1/files?limit=10&purpose=assistants"},
+				{":method", "GET"},
+			})
+			require.Equal(t, types.HeaderStopIteration, action)
+
+			// 验证请求路径是否使用模型占位符
+			requestHeaders := host.GetRequestHeaders()
+			pathValue, hasPath := test.GetHeaderValue(requestHeaders, ":path")
+			require.True(t, hasPath, "Path header should exist")
+			require.Equal(t, pathValue, "/openai/files?limit=10&purpose=assistants&api-version=2024-02-15-preview", "Path should have api-version appended")
+
+			// 设置请求头
+			action = host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{":path", "/v1/files?"},
+				{":method", "GET"},
+			})
+			require.Equal(t, types.HeaderStopIteration, action)
+
+			// 验证请求路径是否使用模型占位符
+			requestHeaders = host.GetRequestHeaders()
+			pathValue, hasPath = test.GetHeaderValue(requestHeaders, ":path")
+			require.True(t, hasPath, "Path header should exist")
+			require.Equal(t, pathValue, "/openai/files?api-version=2024-02-15-preview", "Path should have api-version appended")
 		})
 	})
 }
@@ -827,10 +1232,8 @@ func RunAzureBasePathHandlingTests(t *testing.T) {
 			require.NotContains(t, pathValue, "/azure-gpt4",
 				"After body stage: basePath should be removed from path")
 			// 在 openai 协议下，路径会被转换为 Azure 的路径格式
-			require.Contains(t, pathValue, "/openai/deployments/gpt-4/chat/completions",
+			require.Equal(t, pathValue, "/openai/deployments/gpt-4/chat/completions?api-version=2024-02-15-preview",
 				"Path should be transformed to Azure format")
-			require.Contains(t, pathValue, "api-version=2024-02-15-preview",
-				"Path should contain API version")
 		})
 
 		// 测试 basePath prepend 在 original 协议下能正常工作
