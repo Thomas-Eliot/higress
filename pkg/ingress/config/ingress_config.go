@@ -30,7 +30,9 @@ import (
 	"github.com/golang/protobuf/jsonpb"
 	_struct "github.com/golang/protobuf/ptypes/struct"
 	"github.com/golang/protobuf/ptypes/wrappers"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/anypb"
+	"gopkg.in/yaml.v2"
 	extensions "istio.io/api/extensions/v1alpha1"
 	networking "istio.io/api/networking/v1alpha3"
 	istiotype "istio.io/api/type/v1beta1"
@@ -46,6 +48,7 @@ import (
 	"istio.io/istio/pkg/log"
 	"istio.io/istio/pkg/util/sets"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	listersv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 
@@ -228,6 +231,17 @@ func NewIngressConfig(localKubeClient kube.Client, xdsUpdater istiomodel.XDSUpda
 	higressConfigController := configmap.NewController(localKubeClient, clusterId, namespace)
 	config.configmapMgr = configmap.NewConfigmapMgr(xdsUpdater, namespace, higressConfigController, higressConfigController.Lister())
 	config.configmapMgr.RegisterMcpServerProvider(&config.mcpServerCache)
+
+	config.configmapMgr.ShardConfigMapHandler = func(name util.ClusterNamespacedName) {
+		keyAuthName := util.ClusterNamespacedName{
+			NamespacedName: types.NamespacedName{
+				Namespace: namespace,
+				Name:      "key-auth.internal",
+			},
+			ClusterId: clusterId,
+		}
+		config.AddOrUpdateWasmPlugin(keyAuthName)
+	}
 
 	httpsConfigMgr, _ := cert.NewConfigMgr(namespace, localKubeClient.Kube())
 	config.httpsConfigMgr = httpsConfigMgr
@@ -997,6 +1011,12 @@ func (m *IngressConfig) applyInternalActiveRedirect(convertOptions *common.Conve
 }
 
 func (m *IngressConfig) convertIstioWasmPlugin(obj *higressext.WasmPlugin) (*extensions.WasmPlugin, error) {
+	IngressLog.Debugf("convertIstioWasmPlugin: pluginName=%s, resourceRefs=%v, matchRulesCount=%d",
+		obj.PluginName, obj.ResourceRefs, len(obj.MatchRules))
+	if len(obj.ResourceRefs) > 0 {
+		m.mergeShardedConfigMaps(obj)
+	}
+
 	result := &extensions.WasmPlugin{
 		Selector: &istiotype.WorkloadSelector{
 			MatchLabels: map[string]string{
@@ -1136,6 +1156,227 @@ func (m *IngressConfig) convertIstioWasmPlugin(obj *higressext.WasmPlugin) (*ext
 
 func isBoolValueTrue(b *wrappers.BoolValue) bool {
 	return b != nil && b.Value
+}
+
+func (m *IngressConfig) mergeShardedConfigMaps(obj *higressext.WasmPlugin) {
+	if len(obj.ResourceRefs) == 0 {
+		return
+	}
+
+	IngressLog.Debugf("mergeShardedConfigMaps: processing %d resourceRefs", len(obj.ResourceRefs))
+
+	schemaMap := make(map[string]string)
+	for _, entry := range obj.ResourceTemplateSchema {
+		if entry != nil {
+			schemaMap[entry.Key] = entry.Value
+		}
+	}
+
+	var allConsumers []interface{}
+	var allMatchRules []interface{}
+
+	for _, cmName := range obj.ResourceRefs {
+		cm, err := m.configmapMgr.HigressConfigLister.Get(cmName)
+		if err != nil {
+			IngressLog.Warnf("Failed to get sharded ConfigMap %s: %v", cmName, err)
+			continue
+		}
+		if cm == nil || cm.Data == nil {
+			continue
+		}
+
+		if consumersData, ok := cm.Data["consumers"]; ok && consumersData != "" {
+			var consumers []interface{}
+			if err := yaml.Unmarshal([]byte(consumersData), &consumers); err != nil {
+				IngressLog.Warnf("Failed to parse consumers from ConfigMap %s: %v", cmName, err)
+			} else {
+				allConsumers = append(allConsumers, consumers...)
+			}
+		}
+
+		if matchRulesData, ok := cm.Data["matchRules"]; ok && matchRulesData != "" {
+			var rules []interface{}
+			if err := yaml.Unmarshal([]byte(matchRulesData), &rules); err != nil {
+				IngressLog.Warnf("Failed to parse matchRules from ConfigMap %s: %v", cmName, err)
+			} else {
+				allMatchRules = append(allMatchRules, rules...)
+			}
+		}
+	}
+
+	if len(allConsumers) > 0 {
+		if obj.DefaultConfig == nil {
+			obj.DefaultConfig = &_struct.Struct{
+				Fields: map[string]*_struct.Value{},
+			}
+		}
+		consumersValue := interfaceToStructValue(allConsumers)
+		if consumersValue != nil {
+			existingConsumers := obj.DefaultConfig.Fields["consumers"]
+			if existingConsumers != nil && existingConsumers.GetListValue() != nil {
+				newList := consumersValue.GetListValue()
+				if newList != nil {
+					existingConsumers.GetListValue().Values = append(existingConsumers.GetListValue().Values, newList.Values...)
+				}
+			} else {
+				obj.DefaultConfig.Fields["consumers"] = consumersValue
+			}
+		}
+	}
+
+	if len(allMatchRules) > 0 {
+		mergedRules := mergeMatchRulesByIngress(allMatchRules)
+		for _, newRule := range mergedRules {
+			if len(newRule.Ingress) == 0 {
+				continue
+			}
+			targetIngress := newRule.Ingress[0]
+			found := false
+			for _, existingRule := range obj.MatchRules {
+				if len(existingRule.Ingress) > 0 && existingRule.Ingress[0] == targetIngress {
+					if existingRule.Config != nil && newRule.Config != nil {
+						existingAllow := existingRule.Config.Fields["allow"]
+						newAllow := newRule.Config.Fields["allow"]
+						if existingAllow != nil && newAllow != nil {
+							existingList := existingAllow.GetListValue()
+							newList := newAllow.GetListValue()
+							if existingList != nil && newList != nil {
+								existingList.Values = append(existingList.Values, newList.Values...)
+							}
+						} else if existingAllow == nil && newAllow != nil {
+							existingRule.Config.Fields["allow"] = newAllow
+						}
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				obj.MatchRules = append(obj.MatchRules, newRule)
+			}
+		}
+	}
+}
+
+func mergeMatchRulesByIngress(rawRules []interface{}) []*higressext.MatchRule {
+	type routeAllow struct {
+		ingress string
+		allows  []string
+	}
+	routeMap := make(map[string]*routeAllow)
+
+	for _, raw := range rawRules {
+		ruleMap, ok := raw.(map[interface{}]interface{})
+		if !ok {
+			if ruleMapStr, ok2 := raw.(map[string]interface{}); ok2 {
+				ruleMap = make(map[interface{}]interface{})
+				for k, v := range ruleMapStr {
+					ruleMap[k] = v
+				}
+			} else {
+				continue
+			}
+		}
+
+		var ingressName string
+		if ingressRaw, ok := ruleMap["ingress"]; ok {
+			if ingressList, ok := ingressRaw.([]interface{}); ok && len(ingressList) > 0 {
+				ingressName = fmt.Sprintf("%v", ingressList[0])
+			}
+		}
+		if ingressName == "" {
+			continue
+		}
+
+		var allows []string
+		if configRaw, ok := ruleMap["config"]; ok {
+			configMap := toStringInterfaceMap(configRaw)
+			if configMap != nil {
+				if allowRaw, ok := configMap["allow"]; ok {
+					if allowList, ok := allowRaw.([]interface{}); ok {
+						for _, a := range allowList {
+							allows = append(allows, fmt.Sprintf("%v", a))
+						}
+					}
+				}
+			}
+		}
+
+		if existing, ok := routeMap[ingressName]; ok {
+			existing.allows = append(existing.allows, allows...)
+		} else {
+			routeMap[ingressName] = &routeAllow{ingress: ingressName, allows: allows}
+		}
+	}
+
+	var result []*higressext.MatchRule
+	for _, ra := range routeMap {
+		allowValues := make([]*_struct.Value, 0, len(ra.allows))
+		for _, a := range ra.allows {
+			allowValues = append(allowValues, &_struct.Value{
+				Kind: &_struct.Value_StringValue{StringValue: a},
+			})
+		}
+		rule := &higressext.MatchRule{
+			Ingress: []string{ra.ingress},
+			Config: &_struct.Struct{
+				Fields: map[string]*_struct.Value{
+					"allow": {
+						Kind: &_struct.Value_ListValue{
+							ListValue: &_struct.ListValue{Values: allowValues},
+						},
+					},
+				},
+			},
+		}
+		result = append(result, rule)
+	}
+	return result
+}
+
+func interfaceToStructValue(v interface{}) *_struct.Value {
+	converted := convertYamlMapToJsonMap(v)
+	jsonBytes, err := json.Marshal(converted)
+	if err != nil {
+		return nil
+	}
+	var sv _struct.Value
+	if err := protojson.Unmarshal(jsonBytes, &sv); err != nil {
+		return nil
+	}
+	return &sv
+}
+
+func convertYamlMapToJsonMap(v interface{}) interface{} {
+	switch val := v.(type) {
+	case map[interface{}]interface{}:
+		result := make(map[string]interface{})
+		for k, v2 := range val {
+			result[fmt.Sprintf("%v", k)] = convertYamlMapToJsonMap(v2)
+		}
+		return result
+	case []interface{}:
+		for i, v2 := range val {
+			val[i] = convertYamlMapToJsonMap(v2)
+		}
+		return val
+	default:
+		return v
+	}
+}
+
+func toStringInterfaceMap(v interface{}) map[string]interface{} {
+	switch m := v.(type) {
+	case map[string]interface{}:
+		return m
+	case map[interface{}]interface{}:
+		result := make(map[string]interface{})
+		for k, val := range m {
+			result[fmt.Sprintf("%v", k)] = val
+		}
+		return result
+	}
+	return nil
 }
 
 func (m *IngressConfig) AddOrUpdateWasmPlugin(clusterNamespacedName util.ClusterNamespacedName) {

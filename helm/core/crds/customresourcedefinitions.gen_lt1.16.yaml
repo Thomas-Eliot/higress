@@ -88,6 +88,21 @@ spec:
               description: Determines ordering of `WasmPlugins` in the same `phase`.
               nullable: true
               type: integer
+            resourceRefs:
+              description: References to ConfigMaps for sharded plugin config.
+              items:
+                type: string
+              type: array
+            resourceTemplateSchema:
+              description: Template schema for rendering sharded config.
+              items:
+                properties:
+                  key:
+                    type: string
+                  value:
+                    type: string
+                type: object
+              type: array
             sha256:
               description: SHA256 checksum that will be used to verify Wasm module
                 or OCI container.

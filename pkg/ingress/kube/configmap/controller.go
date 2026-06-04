@@ -16,6 +16,7 @@ package configmap
 
 import (
 	"reflect"
+	"strings"
 	"sync/atomic"
 
 	"istio.io/istio/pilot/pkg/model"
@@ -68,6 +69,8 @@ type ConfigmapMgr struct {
 	higressConfig           atomic.Value
 	ItemControllers         []ItemController
 	XDSUpdater              model.XDSUpdater
+	// ShardConfigMapHandler is called when a shard ConfigMap (hi-key-auth-shard-*) changes
+	ShardConfigMapHandler func(name util.ClusterNamespacedName)
 }
 
 func NewConfigmapMgr(XDSUpdater model.XDSUpdater, namespace string, higressConfigController HigressConfigController, higressConfigLister listersv1.ConfigMapNamespaceLister) *ConfigmapMgr {
@@ -125,6 +128,14 @@ func (c *ConfigmapMgr) AddItemControllers(controllers ...ItemController) {
 }
 
 func (c *ConfigmapMgr) AddOrUpdateHigressConfig(name util.ClusterNamespacedName) {
+	if strings.HasPrefix(name.Name, "hi-key-auth-shard-") || name.Name == "hi-key-auth-route-switches" {
+		IngressLog.Infof("Key-auth ConfigMap changed: %s, triggering WasmPlugin re-conversion", name.Name)
+		if c.ShardConfigMapHandler != nil {
+			c.ShardConfigMapHandler(name)
+		}
+		return
+	}
+
 	if name.Namespace != c.Namespace || name.Name != HigressConfigMapName {
 		return
 	}
