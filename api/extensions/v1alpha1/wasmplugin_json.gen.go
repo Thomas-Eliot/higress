@@ -3,18 +3,60 @@ package v1alpha1
 
 import (
 	bytes "bytes"
+	"encoding/json"
 	jsonpb "github.com/golang/protobuf/jsonpb"
 )
 
 // MarshalJSON is a custom marshaler for WasmPlugin
 func (this *WasmPlugin) MarshalJSON() ([]byte, error) {
 	str, err := WasmpluginMarshaler.MarshalToString(this)
-	return []byte(str), err
+	if err != nil {
+		return nil, err
+	}
+	if len(this.ResourceRefs) == 0 && len(this.ResourceTemplateSchema) == 0 {
+		return []byte(str), nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(str), &m); err != nil {
+		return []byte(str), nil
+	}
+	if len(this.ResourceRefs) > 0 {
+		b, _ := json.Marshal(this.ResourceRefs)
+		m["resourceRefs"] = b
+	}
+	if len(this.ResourceTemplateSchema) > 0 {
+		entries := make([]map[string]string, len(this.ResourceTemplateSchema))
+		for i, e := range this.ResourceTemplateSchema {
+			entries[i] = map[string]string{"key": e.Key, "value": e.Value}
+		}
+		b, _ := json.Marshal(entries)
+		m["resourceTemplateSchema"] = b
+	}
+	return json.Marshal(m)
 }
 
 // UnmarshalJSON is a custom unmarshaler for WasmPlugin
 func (this *WasmPlugin) UnmarshalJSON(b []byte) error {
-	return WasmpluginUnmarshaler.Unmarshal(bytes.NewReader(b), this)
+	if err := WasmpluginUnmarshaler.Unmarshal(bytes.NewReader(b), this); err != nil {
+		return err
+	}
+	var extra struct {
+		ResourceRefs           []string `json:"resourceRefs"`
+		ResourceTemplateSchema []struct {
+			Key   string `json:"key"`
+			Value string `json:"value"`
+		} `json:"resourceTemplateSchema"`
+	}
+	if json.Unmarshal(b, &extra) == nil {
+		this.ResourceRefs = extra.ResourceRefs
+		if len(extra.ResourceTemplateSchema) > 0 {
+			this.ResourceTemplateSchema = make([]*ResourceTemplateSchemaEntry, len(extra.ResourceTemplateSchema))
+			for i, e := range extra.ResourceTemplateSchema {
+				this.ResourceTemplateSchema[i] = &ResourceTemplateSchemaEntry{Key: e.Key, Value: e.Value}
+			}
+		}
+	}
+	return nil
 }
 
 // MarshalJSON is a custom marshaler for MatchRule

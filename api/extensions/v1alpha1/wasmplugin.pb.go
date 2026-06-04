@@ -262,6 +262,53 @@ func (FailStrategy) EnumDescriptor() ([]byte, []int) {
 	return file_extensions_v1alpha1_wasmplugin_proto_rawDescGZIP(), []int{3}
 }
 
+// Route type for matching rules.
+// Extended by Higress
+type RouteType int32
+
+const (
+	RouteType_HTTP RouteType = 0
+	RouteType_GRPC RouteType = 1
+)
+
+var (
+	RouteType_name = map[int32]string{
+		0: "HTTP",
+		1: "GRPC",
+	}
+	RouteType_value = map[string]int32{
+		"HTTP": 0,
+		"GRPC": 1,
+	}
+)
+
+func (x RouteType) Enum() *RouteType {
+	p := new(RouteType)
+	*p = x
+	return p
+}
+
+func (x RouteType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RouteType) Descriptor() protoreflect.EnumDescriptor {
+	return file_extensions_v1alpha1_wasmplugin_proto_enumTypes[4].Descriptor()
+}
+
+func (RouteType) Type() protoreflect.EnumType {
+	return &file_extensions_v1alpha1_wasmplugin_proto_enumTypes[4]
+}
+
+func (x RouteType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RouteType.Descriptor instead.
+func (RouteType) EnumDescriptor() ([]byte, []int) {
+	return file_extensions_v1alpha1_wasmplugin_proto_rawDescGZIP(), []int{4}
+}
+
 // <!-- crd generation tags
 // +cue-gen:WasmPlugin:groupName:extensions.higress.io
 // +cue-gen:WasmPlugin:version:v1alpha1
@@ -342,6 +389,10 @@ type WasmPlugin struct {
 	MatchRules []*MatchRule `protobuf:"bytes,102,rep,name=match_rules,json=matchRules,proto3" json:"match_rules,omitempty"`
 	// disable the default config
 	DefaultConfigDisable *wrappers.BoolValue `protobuf:"bytes,103,opt,name=default_config_disable,json=defaultConfigDisable,proto3" json:"default_config_disable,omitempty"`
+	// Extended by Higress, references to ConfigMaps for sharded plugin config
+	ResourceRefs []string `protobuf:"bytes,104,rep,name=resource_refs,json=resourceRefs,proto3" json:"resourceRefs,omitempty"`
+	// Extended by Higress, template schema for rendering sharded config
+	ResourceTemplateSchema []*ResourceTemplateSchemaEntry `protobuf:"bytes,105,rep,name=resource_template_schema,json=resourceTemplateSchema,proto3" json:"resourceTemplateSchema,omitempty"`
 }
 
 func (x *WasmPlugin) Reset() {
@@ -474,6 +525,20 @@ func (x *WasmPlugin) GetDefaultConfigDisable() *wrappers.BoolValue {
 	return nil
 }
 
+func (x *WasmPlugin) GetResourceRefs() []string {
+	if x != nil {
+		return x.ResourceRefs
+	}
+	return nil
+}
+
+func (x *WasmPlugin) GetResourceTemplateSchema() []*ResourceTemplateSchemaEntry {
+	if x != nil {
+		return x.ResourceTemplateSchema
+	}
+	return nil
+}
+
 // Extended by Higress
 type MatchRule struct {
 	state         protoimpl.MessageState
@@ -485,6 +550,8 @@ type MatchRule struct {
 	Config        *_struct.Struct     `protobuf:"bytes,3,opt,name=config,proto3" json:"config,omitempty"`
 	ConfigDisable *wrappers.BoolValue `protobuf:"bytes,4,opt,name=config_disable,json=configDisable,proto3" json:"config_disable,omitempty"`
 	Service       []string            `protobuf:"bytes,5,rep,name=service,proto3" json:"service,omitempty"`
+	// Route type for this match rule, defaults to HTTP
+	RouteType RouteType `protobuf:"varint,6,opt,name=route_type,json=routeType,proto3,enum=higress.extensions.v1alpha1.RouteType" json:"route_type,omitempty"`
 }
 
 func (x *MatchRule) Reset() {
@@ -552,6 +619,52 @@ func (x *MatchRule) GetService() []string {
 		return x.Service
 	}
 	return nil
+}
+
+func (x *MatchRule) GetRouteType() RouteType {
+	if x != nil {
+		return x.RouteType
+	}
+	return RouteType_HTTP
+}
+
+// Extended by Higress, template schema entry for config sharding
+// Maps a ConfigMap data key to a placeholder name used in rendering
+type ResourceTemplateSchemaEntry struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	// The key in ConfigMap's data field (e.g. "consumers", "matchRules")
+	Key string `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	// The placeholder name (e.g. "consumers", "matchRules")
+	Value string `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+}
+
+func (x *ResourceTemplateSchemaEntry) Reset()         { *x = ResourceTemplateSchemaEntry{} }
+func (x *ResourceTemplateSchemaEntry) String() string { return protoimpl.X.MessageStringOf(x) }
+func (*ResourceTemplateSchemaEntry) ProtoMessage()    {}
+
+func (x *ResourceTemplateSchemaEntry) ProtoReflect() protoreflect.Message {
+	return nil
+}
+
+func (*ResourceTemplateSchemaEntry) Descriptor() ([]byte, []int) {
+	return nil, nil
+}
+
+func (x *ResourceTemplateSchemaEntry) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *ResourceTemplateSchemaEntry) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
 }
 
 // Configuration for a Wasm VM.
@@ -794,7 +907,7 @@ func file_extensions_v1alpha1_wasmplugin_proto_rawDescGZIP() []byte {
 	return file_extensions_v1alpha1_wasmplugin_proto_rawDescData
 }
 
-var file_extensions_v1alpha1_wasmplugin_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_extensions_v1alpha1_wasmplugin_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
 var file_extensions_v1alpha1_wasmplugin_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_extensions_v1alpha1_wasmplugin_proto_goTypes = []interface{}{
 	(PluginPhase)(0),            // 0: higress.extensions.v1alpha1.PluginPhase
