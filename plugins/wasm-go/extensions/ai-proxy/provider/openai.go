@@ -96,6 +96,17 @@ func (m *openaiProviderInitializer) CreateProvider(config ProviderConfig) (Provi
 	isDirectCustomPath := isDirectPath(customPath)
 	capabilities := m.DefaultCapabilities()
 	if !isDirectCustomPath {
+		// Normalize customPath：剥掉尾部斜杠；若 baseUrl 没带任何路径(只到根 "/"），
+		// 补一个 "/v1" 兜底，让最终拼出的路径仍然是标准 OpenAI 形态(/v1/chat/completions)。
+		// 其它情况一律保留用户原值——用户填了显式路径就视为他知道自己后端的路由结构,
+		// 不擅自追加 /v1（例如代理 /api/chat/completions 不应被强拼成 /api/v1/chat/completions）；
+		// 如果他们的后端确实需要 /v1,他们会在 baseUrl 里自己写出来。
+		// 配合 path.Join(customPath, TrimPrefix(mapPath, "/v1"))，无论 baseUrl 是否带 /v1
+		// 都不会出现 /v1/v1/chat/completions 或缺失 /v1 的情况。
+		customPath = strings.TrimSuffix(customPath, "/")
+		if customPath == "" {
+			customPath = "/v1"
+		}
 		for key, mapPath := range capabilities {
 			capabilities[key] = path.Join(customPath, strings.TrimPrefix(mapPath, "/v1"))
 		}
