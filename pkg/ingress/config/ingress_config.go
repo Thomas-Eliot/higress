@@ -1014,7 +1014,6 @@ func (m *IngressConfig) convertIstioWasmPlugin(obj *higressext.WasmPlugin) (*ext
 	IngressLog.Debugf("convertIstioWasmPlugin: pluginName=%s, resourceRefs=%v, matchRulesCount=%d",
 		obj.PluginName, obj.ResourceRefs, len(obj.MatchRules))
 	if len(obj.ResourceRefs) > 0 {
-		obj = obj.DeepCopy()
 		m.mergeShardedConfigMaps(obj)
 	}
 
@@ -1164,10 +1163,14 @@ func (m *IngressConfig) mergeShardedConfigMaps(obj *higressext.WasmPlugin) {
 		return
 	}
 
-	IngressLog.Debugf("mergeShardedConfigMaps: processing %d resourceRefs", len(obj.ResourceRefs))
+	IngressLog.Debugf("mergeShardedConfigMaps: processing %d resourceRefs, inlineMatchRules=%d",
+		len(obj.ResourceRefs), len(obj.MatchRules))
+
+	const routeSwitchesCMName = "hi-key-auth-route-switches"
 
 	var allConsumers []interface{}
-	var allMatchRules []interface{}
+	var shardMatchRules []interface{}
+	var switchMatchRules []interface{}
 
 	for _, cmName := range obj.ResourceRefs {
 		cm, err := m.configmapMgr.HigressConfigLister.Get(cmName)
@@ -1179,12 +1182,16 @@ func (m *IngressConfig) mergeShardedConfigMaps(obj *higressext.WasmPlugin) {
 			continue
 		}
 
-		if consumersData, ok := cm.Data["consumers"]; ok && consumersData != "" {
-			var consumers []interface{}
-			if err := yaml.Unmarshal([]byte(consumersData), &consumers); err != nil {
-				IngressLog.Warnf("Failed to parse consumers from ConfigMap %s: %v", cmName, err)
-			} else {
-				allConsumers = append(allConsumers, consumers...)
+		isRouteSwitches := cmName == routeSwitchesCMName
+
+		if !isRouteSwitches {
+			if consumersData, ok := cm.Data["consumers"]; ok && consumersData != "" {
+				var consumers []interface{}
+				if err := yaml.Unmarshal([]byte(consumersData), &consumers); err != nil {
+					IngressLog.Warnf("Failed to parse consumers from ConfigMap %s: %v", cmName, err)
+				} else {
+					allConsumers = append(allConsumers, consumers...)
+				}
 			}
 		}
 
@@ -1193,7 +1200,11 @@ func (m *IngressConfig) mergeShardedConfigMaps(obj *higressext.WasmPlugin) {
 			if err := yaml.Unmarshal([]byte(matchRulesData), &rules); err != nil {
 				IngressLog.Warnf("Failed to parse matchRules from ConfigMap %s: %v", cmName, err)
 			} else {
-				allMatchRules = append(allMatchRules, rules...)
+				if isRouteSwitches {
+					switchMatchRules = append(switchMatchRules, rules...)
+				} else {
+					shardMatchRules = append(shardMatchRules, rules...)
+				}
 			}
 		}
 	}
@@ -1218,38 +1229,168 @@ func (m *IngressConfig) mergeShardedConfigMaps(obj *higressext.WasmPlugin) {
 		}
 	}
 
-	if len(allMatchRules) > 0 {
-		mergedRules := mergeMatchRulesByIngress(allMatchRules)
-		for _, newRule := range mergedRules {
-			if len(newRule.Ingress) == 0 {
-				continue
-			}
-			targetIngress := newRule.Ingress[0]
-			found := false
-			for _, existingRule := range obj.MatchRules {
-				if len(existingRule.Ingress) > 0 && existingRule.Ingress[0] == targetIngress {
-					if existingRule.Config != nil && newRule.Config != nil {
-						existingAllow := existingRule.Config.Fields["allow"]
-						newAllow := newRule.Config.Fields["allow"]
-						if existingAllow != nil && newAllow != nil {
-							existingList := existingAllow.GetListValue()
-							newList := newAllow.GetListValue()
-							if existingList != nil && newList != nil {
-								existingList.Values = append(existingList.Values, newList.Values...)
-							}
-						} else if existingAllow == nil && newAllow != nil {
-							existingRule.Config.Fields["allow"] = newAllow
+	switchRules := parseScopeSwitches(switchMatchRules)
+	mergedAllowRules := mergeMatchRulesByIngress(shardMatchRules)
+	processedIngresses := make(map[string]bool)
+
+	for _, allowRule := range mergedAllowRules {
+		if len(allowRule.Ingress) == 0 {
+			continue
+		}
+		ingressName := allowRule.Ingress[0]
+		processedIngresses[ingressName] = true
+
+		if sw := findSwitchByIngress(switchRules, ingressName); sw != nil && isBoolValueTrue(sw.ConfigDisable) {
+			allowRule.ConfigDisable = &wrappers.BoolValue{Value: true}
+		}
+
+		found := false
+		for _, existingRule := range obj.MatchRules {
+			if len(existingRule.Ingress) > 0 && existingRule.Ingress[0] == ingressName {
+				if existingRule.Config != nil && allowRule.Config != nil {
+					existingAllow := existingRule.Config.Fields["allow"]
+					newAllow := allowRule.Config.Fields["allow"]
+					if existingAllow != nil && newAllow != nil {
+						existingList := existingAllow.GetListValue()
+						newList := newAllow.GetListValue()
+						if existingList != nil && newList != nil {
+							existingList.Values = append(existingList.Values, newList.Values...)
 						}
+					} else if existingAllow == nil && newAllow != nil {
+						existingRule.Config.Fields["allow"] = newAllow
 					}
-					found = true
-					break
 				}
-			}
-			if !found {
-				obj.MatchRules = append(obj.MatchRules, newRule)
+				if sw := findSwitchByIngress(switchRules, ingressName); sw != nil && isBoolValueTrue(sw.ConfigDisable) {
+					existingRule.ConfigDisable = &wrappers.BoolValue{Value: true}
+				}
+				found = true
+				break
 			}
 		}
+		if !found {
+			obj.MatchRules = append(obj.MatchRules, allowRule)
+		}
 	}
+
+	for _, sw := range switchRules {
+		if len(sw.Ingress) > 0 && processedIngresses[sw.Ingress[0]] {
+			continue
+		}
+
+		found := false
+		for _, existingRule := range obj.MatchRules {
+			if matchRuleScopeEquals(existingRule, sw) {
+				if isBoolValueTrue(sw.ConfigDisable) {
+					existingRule.ConfigDisable = &wrappers.BoolValue{Value: true}
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			rule := &higressext.MatchRule{
+				Ingress: sw.Ingress,
+				Domain:  sw.Domain,
+				Service: sw.Service,
+				Config: &_struct.Struct{
+					Fields: map[string]*_struct.Value{
+						"allow": {
+							Kind: &_struct.Value_ListValue{
+								ListValue: &_struct.ListValue{Values: []*_struct.Value{}},
+							},
+						},
+					},
+				},
+			}
+			if isBoolValueTrue(sw.ConfigDisable) {
+				rule.ConfigDisable = &wrappers.BoolValue{Value: true}
+			}
+			obj.MatchRules = append(obj.MatchRules, rule)
+		}
+	}
+}
+
+func parseScopeSwitches(rawRules []interface{}) []*higressext.MatchRule {
+	var result []*higressext.MatchRule
+	for _, raw := range rawRules {
+		ruleMap, ok := raw.(map[interface{}]interface{})
+		if !ok {
+			if ruleMapStr, ok2 := raw.(map[string]interface{}); ok2 {
+				ruleMap = make(map[interface{}]interface{})
+				for k, v := range ruleMapStr {
+					ruleMap[k] = v
+				}
+			} else {
+				continue
+			}
+		}
+
+		var ingress, domain, service []string
+		if v, ok := ruleMap["ingress"]; ok {
+			ingress = extractStringList(v)
+		}
+		if v, ok := ruleMap["domain"]; ok {
+			domain = extractStringList(v)
+		}
+		if v, ok := ruleMap["service"]; ok {
+			service = extractStringList(v)
+		}
+		if len(ingress) == 0 && len(domain) == 0 && len(service) == 0 {
+			continue
+		}
+
+		var configDisable *wrappers.BoolValue
+		if disableRaw, ok := ruleMap["configDisable"]; ok {
+			switch v := disableRaw.(type) {
+			case bool:
+				configDisable = &wrappers.BoolValue{Value: v}
+			case string:
+				configDisable = &wrappers.BoolValue{Value: v == "true"}
+			}
+		}
+
+		result = append(result, &higressext.MatchRule{
+			Ingress:       ingress,
+			Domain:        domain,
+			Service:       service,
+			ConfigDisable: configDisable,
+		})
+	}
+	return result
+}
+
+func extractStringList(v interface{}) []string {
+	list, ok := v.([]interface{})
+	if !ok || len(list) == 0 {
+		return nil
+	}
+	var result []string
+	for _, item := range list {
+		result = append(result, fmt.Sprintf("%v", item))
+	}
+	return result
+}
+
+func findSwitchByIngress(switches []*higressext.MatchRule, ingressName string) *higressext.MatchRule {
+	for _, sw := range switches {
+		if len(sw.Ingress) > 0 && sw.Ingress[0] == ingressName {
+			return sw
+		}
+	}
+	return nil
+}
+
+func matchRuleScopeEquals(a, b *higressext.MatchRule) bool {
+	if len(a.Ingress) > 0 && len(b.Ingress) > 0 {
+		return a.Ingress[0] == b.Ingress[0]
+	}
+	if len(a.Domain) > 0 && len(b.Domain) > 0 {
+		return a.Domain[0] == b.Domain[0]
+	}
+	if len(a.Service) > 0 && len(b.Service) > 0 {
+		return a.Service[0] == b.Service[0]
+	}
+	return false
 }
 
 func mergeMatchRulesByIngress(rawRules []interface{}) []*higressext.MatchRule {
@@ -1394,7 +1535,7 @@ func (m *IngressConfig) AddOrUpdateWasmPlugin(clusterNamespacedName util.Cluster
 		IngressLog.Debug("WasmPlugin triggered update")
 		f(config.Config{Meta: metadata}, config.Config{Meta: metadata}, istiomodel.EventUpdate)
 	}
-	istioWasmPlugin, err := m.convertIstioWasmPlugin(&wasmPlugin.Spec)
+	istioWasmPlugin, err := m.convertIstioWasmPlugin(wasmPlugin.Spec.DeepCopy())
 	if err != nil {
 		IngressLog.Errorf("invalid wasmPlugin:%s, err:%v", clusterNamespacedName.Name, err)
 		return
