@@ -1014,6 +1014,7 @@ func (m *IngressConfig) convertIstioWasmPlugin(obj *higressext.WasmPlugin) (*ext
 	IngressLog.Debugf("convertIstioWasmPlugin: pluginName=%s, resourceRefs=%v, matchRulesCount=%d",
 		obj.PluginName, obj.ResourceRefs, len(obj.MatchRules))
 	if len(obj.ResourceRefs) > 0 {
+		obj = obj.DeepCopy()
 		m.mergeShardedConfigMaps(obj)
 	}
 
@@ -1164,13 +1165,6 @@ func (m *IngressConfig) mergeShardedConfigMaps(obj *higressext.WasmPlugin) {
 	}
 
 	IngressLog.Debugf("mergeShardedConfigMaps: processing %d resourceRefs", len(obj.ResourceRefs))
-
-	schemaMap := make(map[string]string)
-	for _, entry := range obj.ResourceTemplateSchema {
-		if entry != nil {
-			schemaMap[entry.Key] = entry.Value
-		}
-	}
 
 	var allConsumers []interface{}
 	var allMatchRules []interface{}

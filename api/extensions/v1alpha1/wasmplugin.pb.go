@@ -289,24 +289,10 @@ func (x RouteType) Enum() *RouteType {
 }
 
 func (x RouteType) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (RouteType) Descriptor() protoreflect.EnumDescriptor {
-	return file_extensions_v1alpha1_wasmplugin_proto_enumTypes[4].Descriptor()
-}
-
-func (RouteType) Type() protoreflect.EnumType {
-	return &file_extensions_v1alpha1_wasmplugin_proto_enumTypes[4]
-}
-
-func (x RouteType) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use RouteType.Descriptor instead.
-func (RouteType) EnumDescriptor() ([]byte, []int) {
-	return file_extensions_v1alpha1_wasmplugin_proto_rawDescGZIP(), []int{4}
+	if name, ok := RouteType_name[int32(x)]; ok {
+		return name
+	}
+	return "HTTP"
 }
 
 // <!-- crd generation tags
@@ -907,7 +893,7 @@ func file_extensions_v1alpha1_wasmplugin_proto_rawDescGZIP() []byte {
 	return file_extensions_v1alpha1_wasmplugin_proto_rawDescData
 }
 
-var file_extensions_v1alpha1_wasmplugin_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
+var file_extensions_v1alpha1_wasmplugin_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
 var file_extensions_v1alpha1_wasmplugin_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_extensions_v1alpha1_wasmplugin_proto_goTypes = []interface{}{
 	(PluginPhase)(0),            // 0: higress.extensions.v1alpha1.PluginPhase
