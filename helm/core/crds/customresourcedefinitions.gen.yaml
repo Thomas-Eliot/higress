@@ -383,3 +383,262 @@ spec:
       status: {}
 
 ---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: quotarules.networking.istio.io
+  labels:
+    app: higress
+spec:
+  group: networking.istio.io
+  names:
+    kind: QuotaRule
+    listKind: QuotaRuleList
+    plural: quotarules
+    singular: quotarule
+    categories:
+    - istio-io
+    - networking-istio-io
+  scope: Namespaced
+  versions:
+  - name: v1alpha3
+    served: true
+    storage: true
+    subresources:
+      status: {}
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            description: QuotaRule defines rate limiting and quota management rules.
+            properties:
+              rules:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    match:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          ips:
+                            type: object
+                            properties:
+                              items:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    value:
+                                      type: string
+                                    match_type:
+                                      type: string
+                                      enum: [EXACT, PREFIX, REGEX, ANY]
+                              operation_type:
+                                type: string
+                                enum: [AND, OR]
+                          paths:
+                            type: object
+                            properties:
+                              items:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    name:
+                                      type: string
+                                    value:
+                                      type: string
+                                    match_type:
+                                      type: string
+                                      enum: [EXACT, PREFIX, REGEX, ANY]
+                              operation_type:
+                                type: string
+                                enum: [AND, OR]
+                          headers:
+                            type: object
+                            properties:
+                              items:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    name:
+                                      type: string
+                                    value:
+                                      type: string
+                                    match_type:
+                                      type: string
+                                      enum: [EXACT, PREFIX, REGEX, ANY]
+                              operation_type:
+                                type: string
+                                enum: [AND, OR]
+                          query_params:
+                            type: object
+                            properties:
+                              items:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    param:
+                                      type: string
+                                    value:
+                                      type: string
+                                    match_type:
+                                      type: string
+                                      enum: [EXACT, PREFIX, REGEX, ANY]
+                              operation_type:
+                                type: string
+                                enum: [AND, OR]
+                          operation_type:
+                            type: string
+                            enum: [AND, OR]
+                    rate_limit:
+                      type: object
+                      properties:
+                        requests_per_unit:
+                          type: integer
+                        unit:
+                          type: string
+                          enum: [SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, YEAR]
+                        base_timestamp:
+                          type: integer
+                          format: int64
+                        unit_multiplier:
+                          type: integer
+                        quota_dimension:
+                          type: string
+                        dynamic:
+                          type: boolean
+                        version:
+                          type: string
+                    target:
+                      type: object
+                      properties:
+                        routes:
+                          type: array
+                          items:
+                            type: string
+                    action:
+                      type: object
+                      properties:
+                        custom_response:
+                          type: object
+                          properties:
+                            status_code:
+                              type: integer
+                            body:
+                              type: string
+                            headers:
+                              type: object
+                              additionalProperties:
+                                type: string
+                    fallback:
+                      type: boolean
+                    dimensions:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          short_name:
+                            type: string
+                          name:
+                            type: string
+                          request_header:
+                            type: object
+                            properties:
+                              name:
+                                type: string
+                          separator:
+                            type: string
+                          limit:
+                            type: object
+                            properties:
+                              dynamic:
+                                type: boolean
+                              fallback:
+                                type: object
+                                properties:
+                                  requests_per_unit:
+                                    type: integer
+                                  unit:
+                                    type: string
+                                    enum: [SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, YEAR]
+                                  base_timestamp:
+                                    type: integer
+                                    format: int64
+                                  unit_multiplier:
+                                    type: integer
+                                  quota_dimension:
+                                    type: string
+                                  dynamic:
+                                    type: boolean
+                                  version:
+                                    type: string
+                              by_value:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    value:
+                                      type: string
+                                    rate_limit:
+                                      type: object
+                                      properties:
+                                        requests_per_unit:
+                                          type: integer
+                                        unit:
+                                          type: string
+                                          enum: [SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, YEAR]
+                                        base_timestamp:
+                                          type: integer
+                                          format: int64
+                                        unit_multiplier:
+                                          type: integer
+                                        quota_dimension:
+                                          type: string
+                                        dynamic:
+                                          type: boolean
+                                        version:
+                                          type: string
+                          priority:
+                            type: integer
+                          source:
+                            type: object
+                            x-kubernetes-preserve-unknown-fields: true
+                    parallel_degraded_mode:
+                      type: string
+                      enum: [any, max_exhausted]
+                    avg_tokens_per_request:
+                      type: integer
+                    sync_latency_reserve_tokens:
+                      type: integer
+                    assignment_time_to_live:
+                      type: integer
+                    application_scope:
+                      type: string
+                      enum: [ROUTE, GLOBAL_DEFAULT]
+                    cost_extractor:
+                      type: object
+                      properties:
+                        default_cost:
+                          type: integer
+                        response_cost:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+              redis_info:
+                type: object
+                properties:
+                  redis_url:
+                    type: string
+                  redis_auth:
+                    type: string
+          status:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true

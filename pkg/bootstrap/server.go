@@ -49,6 +49,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 
+	"istio.io/istio/pilot/pkg/config/alikube/quotarule"
+
 	"github.com/alibaba/higress/v2/pkg/cert"
 	higressconfig "github.com/alibaba/higress/v2/pkg/config"
 	"github.com/alibaba/higress/v2/pkg/ingress/kube/common"
@@ -239,6 +241,15 @@ func (s *Server) initConfigController() error {
 	ingressConfig.AddLocalCluster(options)
 
 	s.configStores = append(s.configStores, ingressConfig)
+
+	// QuotaRule controller for large-scale consumer rate limiting
+	quotaRuleController := quotarule.NewController(s.kubeClient, ns)
+	s.configStores = append(s.configStores, quotaRuleController)
+	s.environment.QuotaRuleProvider = quotaRuleController
+	s.server.RunComponent("quotarule-controller", func(stop <-chan struct{}) error {
+		go quotaRuleController.Run(stop)
+		return nil
+	})
 
 	// Wrap the config controller with a cache.
 	aggregateConfigController, err := configaggregate.MakeCache(s.configStores)

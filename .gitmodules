@@ -1,35 +1,36 @@
 [submodule "istio/api"]
 	path = istio/api
-	url = https://github.com/higress-group/api
+	url = git@gitlab.alibaba-inc.com:csb2/istio_api.git
 	branch = istio-1.19
-	shallow = true
 [submodule "istio/istio"]
 	path = istio/istio
-	url = https://github.com/higress-group/istio
+	url = git@gitlab.alibaba-inc.com:csb2/istio.git
 	branch = istio-1.19
-	shallow = true
 [submodule "istio/client-go"]
 	path = istio/client-go
-	url = https://github.com/higress-group/client-go
+	url = git@gitlab.alibaba-inc.com:csb2/istio_client-go.git
 	branch = istio-1.19
-	shallow = true
 [submodule "istio/pkg"]
 	path = istio/pkg
-	url = https://github.com/higress-group/pkg
+	url = git@gitlab.alibaba-inc.com:csb2/istio_pkg.git
 	branch = istio-1.19
-	shallow = true
 [submodule "istio/proxy"]
 	path = istio/proxy
-	url = https://github.com/higress-group/proxy
+	url = git@gitlab.alibaba-inc.com:csb2/istio_proxy.git
 	branch = istio-1.19
-	shallow = true
 [submodule "envoy/go-control-plane"]
 	path = envoy/go-control-plane
-	url = https://github.com/higress-group/go-control-plane
+	url = git@gitlab.alibaba-inc.com:csb2/envoy_go-control-plane.git
 	branch = istio-1.19
-	shallow = true
 [submodule "envoy/envoy"]
 	path = envoy/envoy
-	url = https://github.com/higress-group/envoy
+	url = git@gitlab.alibaba-inc.com:csb2/envoy.git
 	branch = envoy-1.27
-	shallow = true
+[submodule "aigateway-ratelimit-quota-knownow"]
+	path = aigateway-ratelimit-quota-knownow
+	url = git@gitlab.alibaba-inc.com:lvshui/aigateway-ratelimit-quota-knownow.git
+	branch = main
+[submodule "ratelimit-quota-server"]
+	path = ratelimit-quota-server
+	url = git@gitlab.alibaba-inc.com:Ingress/ratelimit-quota-server.git
+	branch = master
