@@ -45,6 +45,7 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20230920204549-e6e6cdab5c13
 	google.golang.org/grpc v1.59.0
 	google.golang.org/protobuf v1.33.0
+	gopkg.in/yaml.v2 v2.4.0
 	istio.io/api v1.19.5-0.20231206014255-f55a2b1e931e
 	istio.io/istio v0.0.0
 	istio.io/pkg v0.0.0-20231221211216-7635388a563e
@@ -245,7 +246,6 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/square/go-jose.v2 v2.6.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
-	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gotest.tools/v3 v3.5.0 // indirect
 	istio.io/client-go v1.19.5-0.20231206015206-8cdf6a3b3cfd // indirect
