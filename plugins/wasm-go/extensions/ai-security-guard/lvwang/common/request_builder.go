@@ -15,7 +15,7 @@ import (
 	"time"
 
 	cfg "github.com/alibaba/higress/plugins/wasm-go/extensions/ai-security-guard/config"
-	"github.com/google/uuid"
+	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-security-guard/utils"
 )
 
 const (
@@ -47,7 +47,8 @@ func newRequest(httpMethod, canonicalUri, host, xAcsAction, xAcsVersion string) 
 	req.headers["x-acs-action"] = xAcsAction
 	req.headers["x-acs-version"] = xAcsVersion
 	req.headers["x-acs-date"] = time.Now().UTC().Format(time.RFC3339)
-	req.headers["x-acs-signature-nonce"] = uuid.New().String()
+	nonce, _ := utils.GenerateHexID(32)
+	req.headers["x-acs-signature-nonce"] = nonce
 	return req
 }
 

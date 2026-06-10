@@ -4,6 +4,7 @@ import (
 	cfg "github.com/alibaba/higress/plugins/wasm-go/extensions/ai-security-guard/config"
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-security-guard/lvwang/multi_modal_guard"
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-security-guard/lvwang/text_moderation_plus"
+	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-security-guard/tianjian"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/higress-group/wasm-go/pkg/log"
@@ -48,6 +49,8 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config cfg.AISecurityConfig, bod
 		return multi_modal_guard.OnHttpRequestBody(ctx, config, body)
 	case cfg.TextModerationPlus:
 		return text_moderation_plus.OnHttpRequestBody(ctx, config, body)
+	case cfg.TianjianSecurityGuard:
+		return tianjian.OnHttpRequestBody(ctx, config, body)
 	default:
 		log.Warnf("Unknown action %s", config.Action)
 		return types.ActionContinue
@@ -73,6 +76,8 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config cfg.AISecurityConfig)
 		return multi_modal_guard.OnHttpResponseHeaders(ctx, config)
 	case cfg.TextModerationPlus:
 		return text_moderation_plus.OnHttpResponseHeaders(ctx, config)
+	case cfg.TianjianSecurityGuard:
+		return tianjian.OnHttpResponseHeaders(ctx, config)
 	default:
 		log.Warnf("Unknown action %s", config.Action)
 		return types.ActionContinue
@@ -86,6 +91,8 @@ func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config cfg.AISecurityC
 		return multi_modal_guard.OnHttpStreamingResponseBody(ctx, config, data, endOfStream)
 	case cfg.TextModerationPlus:
 		return text_moderation_plus.OnHttpStreamingResponseBody(ctx, config, data, endOfStream)
+	case cfg.TianjianSecurityGuard:
+		return tianjian.OnHttpStreamingResponseBody(ctx, config, data, endOfStream)
 	default:
 		log.Warnf("Unknown action %s", config.Action)
 		return data
@@ -99,6 +106,8 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config cfg.AISecurityConfig, bo
 		return multi_modal_guard.OnHttpResponseBody(ctx, config, body)
 	case cfg.TextModerationPlus:
 		return text_moderation_plus.OnHttpResponseBody(ctx, config, body)
+	case cfg.TianjianSecurityGuard:
+		return tianjian.OnHttpResponseBody(ctx, config, body)
 	default:
 		log.Warnf("Unknown action %s", config.Action)
 		return types.ActionContinue

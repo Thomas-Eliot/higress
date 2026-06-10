@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-security-guard/utils"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
@@ -65,8 +66,9 @@ const (
 
 	OpenAIDenyResponseFormatConsumerScopeError = "openAIDenyResponseFormat must be configured at plugin global scope, not under consumerRiskLevel"
 
-	DefaultDenyCode    = 200
-	DefaultDenyMessage = "很抱歉，我无法回答您的问题"
+	DefaultDenyCode      = 200
+	DefaultDenyMessage   = "很抱歉，我无法回答您的问题"
+	DefaultDenyMessageEn = "Sorry, I can't answer this question"
 	DefaultTimeout     = 2000
 
 	AliyunUserAgent = "CIPFrom/AIGateway"
@@ -82,6 +84,20 @@ const (
 	MultiModalGuard          = "MultiModalGuard"
 	MultiModalGuardForBase64 = "MultiModalGuardForBase64"
 	TextModerationPlus       = "TextModerationPlus"
+	TianjianSecurityGuard     = "TianjianSecurityGuard"
+
+	// Tianjian Scene Codes
+	TianjianSceneCodeInputDetection     = "llm_input_detection"
+	TianjianSceneCodeInputDetectionPro  = "llm_input_detection_pro"
+	TianjianSceneCodeOutputDetection    = "llm_output_detection"
+	TianjianSceneCodeOutputDetectionMax  = "llm_output_detection_max"
+	TianjianSceneCodeOutputDetectionPro  = "llm_output_detection_pro"
+
+	// Tianjian Action Codes (response judgment)
+	TianjianActionPass            = "PASS"
+	TianjianActionBlock           = "BLOCK"
+	TianjianActionSecurityAnswer  = "SECURITY_ANSWER"
+	TianjianActionSecurityWarning = "SECURITY_WARNING"
 
 	// Services
 	DefaultMultiModalGuardTextInputCheckService  = "query_security_check"
@@ -90,6 +106,10 @@ const (
 
 	DefaultTextModerationPlusTextInputCheckService  = "llm_query_moderation"
 	DefaultTextModerationPlusTextOutputCheckService = "llm_response_moderation"
+
+	// Tianjian API defaults
+	DefaultTianjianInputCheckService  = "QuerySecurityQuestion"
+	DefaultTianjianOutputCheckService = "QuerySecurityAnswer"
 )
 
 var (
@@ -170,6 +190,37 @@ type Detail struct {
 	Result     []Result `json:"Result,omitempty"`
 }
 
+// TianjianOuterResponse wraps the actual Tianjian response inside a "response" key.
+type TianjianOuterResponse struct {
+	Response TianjianResponse `json:"response"`
+	Sign     string         `json:"sign"`
+}
+
+type TianjianResponse struct {
+	ReqMsgId        string          `json:"req_msg_id"`
+	ResultCode      string          `json:"result_code"`
+	ResultMsg       string          `json:"result_msg"`
+	ActionCode      string          `json:"action_code"`
+	SessionId       string          `json:"session_id"`
+	SecurityPrompt  string          `json:"security_prompt,omitempty"`
+	SecurityAnswer  string          `json:"security_answer,omitempty"`
+	LimitAnswer     string          `json:"limit_answer,omitempty"`
+	ObfuscationData string          `json:"obfuscation_data,omitempty"`
+	Labels          []TianjianLabel `json:"labels,omitempty"`
+	FieldInfo       map[string]interface{} `json:"field_info,omitempty"`
+}
+
+type TianjianLabel struct {
+	Label     string            `json:"label"`
+	SubLabels []TianjianSubLabel `json:"sub_labels,omitempty"`
+}
+
+type TianjianSubLabel struct {
+	SubLabel     string   `json:"sub_label"`
+	RiskWords    []string `json:"risk_words,omitempty"`
+	RiskWordsIndex []string `json:"riskWordsIndex,omitempty"`
+}
+
 type Matcher struct {
 	Exact  string
 	Prefix string
@@ -210,6 +261,7 @@ type AISecurityConfig struct {
 	ResponseErrorContentJsonPath           string
 	DenyCode                               int64
 	DenyMessage                            string
+	DenyMessageZh                          string
 	ProtocolOriginal                       bool
 	OpenAIDenyResponseFormat               OpenAIDenyResponseFormat
 	RiskLevelBar                           string
@@ -239,6 +291,26 @@ type AISecurityConfig struct {
 	MaliciousUrlAction       string
 	ModelHallucinationAction string
 	CustomLabelAction        string
+
+	// Tianjian-specific fields
+	TianjianAK                           string
+	TianjianSK                           string
+	Enterprise                           string
+	BusinessId                           string
+	TianjianSceneCodeInput               string
+	TianjianSceneCodeOutput              string
+	TianjianPromptAttackDefense          bool
+	TianjianMultiSessionDetect           bool
+	TianjianFinanceComplianceDetection   bool
+	TianjianPrivacyDataDetection         bool
+	TianjianFieldIdentify                bool
+	TianjianPromptReword                 bool
+	TianjianPrivacyDataObfuscation       bool
+	
+	// Credential type for Green Net (lvwang) authentication
+	// When set to "oidc_role_arn", AK/SK are obtained via RRSA token exchange at runtime,
+	// so the static AK/SK validation should be skipped during config parsing.
+	CredentialType                        string
 }
 
 func (config *AISecurityConfig) Parse(json gjson.Result) error {
@@ -251,15 +323,22 @@ func (config *AISecurityConfig) Parse(json gjson.Result) error {
 	}
 	config.AK = json.Get("accessKey").String()
 	config.SK = json.Get("secretKey").String()
-	if config.AK == "" || config.SK == "" {
-		return errors.New("invalid AK/SK config")
-	}
 	config.Token = json.Get("securityToken").String()
+	config.CredentialType = json.Get("credentialType").String()
 	// set action
 	if obj := json.Get("action"); obj.Exists() {
 		config.Action = json.Get("action").String()
 	} else {
 		config.Action = TextModerationPlus
+	}
+	// For Tianjian, AK/SK are provided via separate tianjianAk/tianjianSk fields
+	// Skip the general AK/SK validation for TianjianSecurityGuard action
+	// For Green Net with credentialType=oidc_role_arn (RRSA mode), AK/SK are obtained
+	// at runtime via RRSA token exchange, so skip the static AK/SK validation as well
+	if config.Action != TianjianSecurityGuard && config.CredentialType != "oidc_role_arn" {
+		if config.AK == "" || config.SK == "" {
+			return errors.New("invalid AK/SK config")
+		}
 	}
 	// set default values
 	config.SetDefaultValues()
@@ -336,6 +415,7 @@ func (config *AISecurityConfig) Parse(json gjson.Result) error {
 		}
 	}
 	config.DenyMessage = json.Get("denyMessage").String()
+	config.DenyMessageZh = json.Get("denyMessageZh").String()
 	if obj := json.Get("denyCode"); obj.Exists() {
 		config.DenyCode = obj.Int()
 	}
@@ -506,6 +586,46 @@ func (config *AISecurityConfig) Parse(json gjson.Result) error {
 	if obj := json.Get("providerType"); obj.Exists() {
 		config.ProviderType = obj.String()
 	}
+
+	// Parse Tianjian-specific fields
+	// Support both naming conventions: tianjianAk/tianjianSk (preferred) and accessKey/accessKeySecret (from admin console)
+	config.TianjianAK = json.Get("tianjianAk").String()
+	if config.TianjianAK == "" {
+		config.TianjianAK = json.Get("accessKey").String()
+	}
+	config.TianjianSK = json.Get("tianjianSk").String()
+	if config.TianjianSK == "" {
+		config.TianjianSK = json.Get("accessKeySecret").String()
+	}
+	config.Enterprise = json.Get("enterprise").String()
+	config.BusinessId = json.Get("businessId").String()
+
+	if config.Action == TianjianSecurityGuard {
+		if config.TianjianAK == "" || config.TianjianSK == "" {
+			return errors.New("tianjianAk and tianjianSk are required for TianjianSecurityGuard")
+		}
+		if config.Enterprise == "" || config.BusinessId == "" {
+			return errors.New("enterprise and businessId are required for TianjianSecurityGuard")
+		}
+	}
+
+	config.TianjianSceneCodeInput = json.Get("tianjianSceneCodeInput").String()
+	if config.TianjianSceneCodeInput == "" {
+		config.TianjianSceneCodeInput = TianjianSceneCodeInputDetection
+	}
+	config.TianjianSceneCodeOutput = json.Get("tianjianSceneCodeOutput").String()
+	if config.TianjianSceneCodeOutput == "" {
+		config.TianjianSceneCodeOutput = TianjianSceneCodeOutputDetection
+	}
+
+	config.TianjianPromptAttackDefense = json.Get("tianjianPromptAttackDefense").Bool()
+	config.TianjianMultiSessionDetect = json.Get("tianjianMultiSessionDetect").Bool()
+	config.TianjianFinanceComplianceDetection = json.Get("tianjianFinanceComplianceDetection").Bool()
+	config.TianjianPrivacyDataDetection = json.Get("tianjianPrivacyDataDetection").Bool()
+	config.TianjianFieldIdentify = json.Get("tianjianFieldIdentify").Bool()
+	config.TianjianPromptReword = json.Get("tianjianPromptReword").Bool()
+	config.TianjianPrivacyDataObfuscation = json.Get("tianjianPrivacyDataObfuscation").Bool()
+
 	config.Client = wrapper.NewClusterClient(wrapper.FQDNCluster{
 		FQDN: serviceName,
 		Port: servicePort,
@@ -560,6 +680,9 @@ func (config *AISecurityConfig) SetDefaultValues() {
 		config.RequestCheckService = DefaultMultiModalGuardTextInputCheckService
 		config.RequestImageCheckService = DefaultMultiModalGuardImageInputCheckService
 		config.ResponseCheckService = DefaultMultiModalGuardTextOutputCheckService
+	case TianjianSecurityGuard:
+		config.RequestCheckService = DefaultTianjianInputCheckService
+		config.ResponseCheckService = DefaultTianjianOutputCheckService
 	}
 	config.RiskLevelBar = HighRisk
 	config.DenyCode = DefaultDenyCode
@@ -958,6 +1081,26 @@ func IsRiskLevelAcceptable(action string, data Data, config AISecurityConfig, co
 	return EvaluateRisk(action, data, config, consumer) != RiskBlock
 }
 
+// EvaluateTianjianRisk evaluates Tianjian's actionCode-based risk.
+// Returns RiskBlock if actionCode is BLOCK or SECURITY_ANSWER, RiskPass otherwise.
+func EvaluateTianjianRisk(response TianjianResponse) RiskResult {
+	actionCode := response.ActionCode
+	switch actionCode {
+	case TianjianActionBlock, TianjianActionSecurityAnswer:
+		return RiskBlock
+	case TianjianActionSecurityWarning:
+		return RiskPass // SECURITY_WARNING is informational, content still passes
+	case TianjianActionPass:
+		return RiskPass
+	default:
+		return RiskBlock // Unknown/error response — fail closed
+	}
+}
+
+func IsTianjianRiskAcceptable(response TianjianResponse) bool {
+	return EvaluateTianjianRisk(response) != RiskBlock
+}
+
 // ExtractDesensitization extracts the desensitization content from the first Detail
 // with Type=sensitiveData and Suggestion=mask. Returns empty string if no such
 // Detail exists, if the Detail has no Result entries, or if the desensitization
@@ -1009,6 +1152,32 @@ func ResolveDenyMessage(config AISecurityConfig) string {
 		return config.DenyMessage
 	}
 	return DefaultDenyMessage
+}
+
+// ContainsChinese checks whether the given text contains any CJK (Chinese) characters.
+func ContainsChinese(text string) bool {
+	for _, r := range text {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// ResolveDenyMessageForInput returns a language-appropriate deny message based on the user's input.
+// If the input contains Chinese characters, it returns the Chinese deny message;
+// otherwise it returns the English deny message.
+func ResolveDenyMessageForInput(config AISecurityConfig, userInput string) string {
+	if ContainsChinese(userInput) {
+		if config.DenyMessageZh != "" {
+			return config.DenyMessageZh
+		}
+		return DefaultDenyMessage
+	}
+	if config.DenyMessage != "" {
+		return config.DenyMessage
+	}
+	return DefaultDenyMessageEn
 }
 
 // BuildOpenAIDenyResponseBody builds the guardrail JSON object embedded by the

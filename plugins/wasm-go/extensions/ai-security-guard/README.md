@@ -1,11 +1,15 @@
 ---
 title: AI内容安全
 keywords: [higress, AI, security]
-description: 阿里云内容安全检测
+description: 支持阿里云内容安全（绿网）和蚂蚁天鉴安全护栏两种服务
 ---
 
 ## 功能说明
-通过对接阿里云内容安全检测大模型的输入输出，保障AI应用内容合法合规。
+通过对接安全服务检测大模型的输入输出，保障AI应用内容合法合规。
+
+**支持两种安全服务：**
+- **阿里云内容安全（绿网）**：基于阿里云内容安全服务进行检测，支持 `TextModerationPlus` 和 `MultiModalGuard` 两种 action
+- **蚂蚁天鉴安全护栏**：基于蚂蚁天鉴服务进行检测，提供提示词攻击防御、多轮对话检测、金融合规检测等高级功能
 
 ## 运行属性
 
@@ -13,38 +17,65 @@ description: 阿里云内容安全检测
 插件执行优先级：`300`
 
 ## 配置说明
+
+### 通用配置字段
 | Name | Type | Requirement | Default | Description |
 | ------------ | ------------ | ------------ | ------------ | ------------ |
-| `serviceName` | string | requried | - | 服务名 |
-| `servicePort` | string | requried | - | 服务端口 |
-| `serviceHost` | string | requried | - | 阿里云内容安全endpoint的域名 |
-| `accessKey` | string | requried | - | 阿里云AK |
-| `secretKey` | string | requried | - | 阿里云SK |
-| `action` | string | requried | - | 阿里云ai安全业务接口 |
-| `securityToken` | string | optional | - | 阿里云安全令牌（用于临时凭证） |
+| `serviceName` | string | required | - | 服务名 |
+| `servicePort` | int | required | - | 服务端口 |
+| `serviceHost` | string | required | - | 安全服务endpoint的域名 |
+| `action` | string | required | TextModerationPlus | 安全业务接口类型，取值为 `TextModerationPlus`、`MultiModalGuard`、`MultiModalGuardForBase64` 或 `TianjianSecurityGuard` |
 | `checkRequest` | bool | optional | false | 检查提问内容是否合规 |
 | `checkResponse` | bool | optional | false | 检查大模型的回答内容是否合规，生效时会使流式响应变为非流式 |
-| `requestCheckService` | string | optional | llm_query_moderation | 指定阿里云内容安全用于检测输入内容的服务 |
-| `responseCheckService` | string | optional | llm_response_moderation | 指定阿里云内容安全用于检测输出内容的服务 |
 | `requestContentJsonPath` | string | optional | `messages.@reverse.0.content` | 指定要检测内容在请求body中的jsonpath |
 | `responseContentJsonPath` | string | optional | `choices.0.message.content` | 指定要检测内容在响应body中的jsonpath |
 | `responseStreamContentJsonPath` | string | optional | `choices.0.delta.content` | 指定要检测内容在流式响应body中的jsonpath |
 | `responseContentFallbackJsonPaths` | array | optional | [`choices.0.message.content`, `content.#(type=="text")#.text`] | 当 `responseContentJsonPath` 提取为空时，按顺序尝试这些兜底路径；与主路径相同的项会自动跳过；显式配置为空数组 `[]` 可禁用兜底 |
 | `responseStreamContentFallbackJsonPaths` | array | optional | [`choices.0.delta.content`, `delta.text`] | 当 `responseStreamContentJsonPath` 提取为空时，按顺序尝试这些流式兜底路径；与主路径相同的项会自动跳过；显式配置为空数组 `[]` 可禁用兜底 |
 | `denyCode` | int | optional | 200 | 指定内容非法时的响应状态码 |
-| `denyMessage` | string | optional | openai格式的流式/非流式响应 | 指定内容非法时的响应内容 |
+| `denyMessage` | string | optional | "很抱歉，我无法回答您的问题" | 指定内容非法时的响应内容 |
 | `protocol` | string | optional | openai | 协议格式，非openai协议填`original` |
 | `openAIDenyResponseFormat` | string | optional | legacy | OpenAI 包装拒答的响应形态，取值为 `legacy` 或 `structured`。默认 `legacy` 保持历史兼容；配置为 `structured` 时在 `choices[0].x_higress_guardrail` 输出结构化拦截详情 |
-| `contentModerationLevelBar` | string | optional | max | 内容合规检测拦截风险等级，取值为 `max`, `high`, `medium` or `low` |
-| `promptAttackLevelBar` | string | optional | max | 提示词攻击检测拦截风险等级，取值为 `max`, `high`, `medium` or `low` |
-| `sensitiveDataLevelBar` | string | optional | S4 | 敏感内容检测拦截风险等级，取值为  `S4`, `S3`, `S2` or `S1` |
-| `customLabelLevelBar` | string | optional | max | 自定义检测拦截风险等级，取值为 max, high, medium, low |
-| `riskAction` | string | optional | block | 风险处置动作，取值为 `block` 或 `mask`。`block` 表示按风险等级阈值拦截请求，`mask` 表示当 API 返回脱敏建议时使用脱敏内容替换敏感字段。注意：脱敏功能仅适用于 MultiModalGuard 模式 |
-| `timeout` | int | optional | 2000 | 调用内容安全服务时的超时时间 |
+| `timeout` | int | optional | 2000 | 调用安全服务时的超时时间（毫秒） |
 | `bufferLimit` | int | optional | 1000 | 调用内容安全服务时每段文本的长度限制 |
+
+### 阿里云内容安全（绿网）配置字段
+当 `action` 为 `TextModerationPlus` 或 `MultiModalGuard` 时使用：
+
+| Name | Type | Requirement | Default | Description |
+| ------------ | ------------ | ------------ | ------------ | ------------ |
+| `accessKey` | string | required | - | 阿里云AK |
+| `secretKey` | string | required | - | 阿里云SK |
+| `securityToken` | string | optional | - | 阿里云安全令牌（用于临时凭证） |
+| `requestCheckService` | string | optional | llm_query_moderation | 指定用于检测输入内容的服务 |
+| `responseCheckService` | string | optional | llm_response_moderation | 指定用于检测输出内容的服务 |
+| `contentModerationLevelBar` | string | optional | max | 内容合规检测拦截风险等级：`max`、`high`、`medium`、`low` |
+| `promptAttackLevelBar` | string | optional | max | 提示词攻击检测拦截风险等级：`max`、`high`、`medium`、`low` |
+| `sensitiveDataLevelBar` | string | optional | S4 | 敏感内容检测拦截风险等级：`S4`、`S3`、`S2`、`S1` |
+| `customLabelLevelBar` | string | optional | max | 自定义检测拦截风险等级 |
+| `riskAction` | string | optional | block | 风险处置动作：`block`（拦截）或 `mask`（脱敏） |
 | `consumerRequestCheckService` | map | optional | - | 为不同消费者指定特定的请求检测服务 |
 | `consumerResponseCheckService` | map | optional | - | 为不同消费者指定特定的响应检测服务 |
 | `consumerRiskLevel` | map | optional | - | 为不同消费者指定各维度的拦截风险等级 |
+
+### 蚂蚁天鉴安全护栏配置字段
+当 `action` 为 `TianjianSecurityGuard` 时使用：
+
+| Name | Type | Requirement | Default | Description |
+| ------------ | ------------ | ------------ | ------------ | ------------ |
+| `tianjianAk` | string | required | - | 蚂蚁天鉴AK（也可使用 `accessKey` 字段） |
+| `tianjianSk` | string | required | - | 蚂蚁天鉴SK（也可使用 `accessKeySecret` 字段） |
+| `enterprise` | string | required | - | 企业标识 |
+| `businessId` | string | required | - | 业务标识 |
+| `tianjianSceneCodeInput` | string | optional | llm_input_detection | 输入检测场景码 |
+| `tianjianSceneCodeOutput` | string | optional | llm_output_detection | 输出检测场景码 |
+| `tianjianPromptAttackDefense` | bool | optional | false | 启用提示词攻击防御 |
+| `tianjianMultiSessionDetect` | bool | optional | false | 启用多轮对话检测 |
+| `tianjianFinanceComplianceDetection` | bool | optional | false | 启用金融合规检测 |
+| `tianjianPrivacyDataDetection` | bool | optional | false | 启用隐私数据检测 |
+| `tianjianFieldIdentify` | bool | optional | false | 启用字段识别 |
+| `tianjianPromptReword` | bool | optional | false | 启用提示词重写 |
+| `tianjianPrivacyDataObfuscation` | bool | optional | false | 启用隐私数据脱敏 |
 
 ### 拒绝响应结构
 
@@ -252,6 +283,54 @@ responseStreamContentFallbackJsonPaths:
 responseContentFallbackJsonPaths: []
 responseStreamContentFallbackJsonPaths: []
 ```
+
+### 蚂蚁天鉴安全护栏配置示例
+
+使用蚂蚁天鉴安全护栏服务时，需要配置 `action: TianjianSecurityGuard`：
+
+**基础配置（检测输入内容）**：
+```yaml
+serviceName: tianjian-security-service.dns
+servicePort: 443
+serviceHost: "openapi.antdigital.com"
+action: TianjianSecurityGuard
+tianjianAk: "XXXXXXXXX"
+tianjianSk: "XXXXXXXXXXXXXXX"
+enterprise: "your_enterprise_id"
+businessId: "your_business_id"
+checkRequest: true
+```
+
+**完整配置（检测输入与输出）**：
+```yaml
+serviceName: tianjian-security-service.dns
+servicePort: 443
+serviceHost: "openapi.antdigital.com"
+action: TianjianSecurityGuard
+tianjianAk: "XXXXXXXXX"
+tianjianSk: "XXXXXXXXXXXXXXX"
+enterprise: "your_enterprise_id"
+businessId: "your_business_id"
+checkRequest: true
+checkResponse: true
+tianjianSceneCodeInput: "llm_input_detection"
+tianjianSceneCodeOutput: "llm_output_detection"
+tianjianPromptAttackDefense: true
+tianjianMultiSessionDetect: false
+tianjianFinanceComplianceDetection: false
+tianjianPrivacyDataDetection: false
+tianjianFieldIdentify: false
+tianjianPromptReword: false
+tianjianPrivacyDataObfuscation: false
+denyMessage: "Sorry, I can't answer this question"
+```
+
+**天鉴场景码说明**：
+- `llm_input_detection`: 标准输入检测
+- `llm_input_detection_pro`: 增强输入检测
+- `llm_output_detection`: 标准输出检测
+- `llm_output_detection_max`: 最大级别输出检测
+- `llm_output_detection_pro`: 增强输出检测
 
 ## 可观测
 ### Metric
