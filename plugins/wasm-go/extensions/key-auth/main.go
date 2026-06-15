@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
@@ -62,6 +63,14 @@ type Consumer struct {
 	// @Description en-US The credentials of the consumer. Cannot be configured together with credential.
 	// @Scope GLOBAL
 	Credentials []string `yaml:"credentials"`
+}
+
+// AllowRule 带时间约束的授权规则
+type AllowRule struct {
+	Name           string `yaml:"name"`
+	ValidTimeStart string `yaml:"valid_time_start,omitempty"`
+	ValidTimeEnd   string `yaml:"valid_time_end,omitempty"`
+	ExpireTime     string `yaml:"expire_time,omitempty"`
 }
 
 // @Name key-auth
@@ -133,6 +142,12 @@ type KeyAuthConfig struct {
 	// @Description 对于匹配上述条件的请求，允许访问的调用方列表。
 	// @Description en-US Consumers to be allowed for matched requests.
 	allow []string `yaml:"allow"`
+
+	// @Title 带时间约束的授权访问调用方列表
+	// @Title en-US Allowed Consumers with Time Constraints
+	// @Description 对于匹配上述条件的请求，允许访问的调用方列表，支持时间约束。
+	// @Description en-US Consumers to be allowed for matched requests, with optional time constraints.
+	allowRules []AllowRule `yaml:"allow_rules"`
 
 	credential2Name map[string]string `yaml:"-"`
 }
@@ -247,17 +262,53 @@ func parseOverrideRuleConfig(json gjson.Result, global KeyAuthConfig, config *Ke
 
 	*config = global
 
+	// 解析 allow（简单字符串数组）
 	allow := json.Get("allow")
-	if !allow.Exists() {
-		return errors.New("allow is required")
-	}
-	if len(allow.Array()) == 0 {
-		return errors.New("allow cannot be empty")
+	
+	// 解析 allow_rules（带时间约束的授权列表）
+	allowRules := json.Get("allow_rules")
+	
+	// allow 或 allow_rules 至少有一个非空
+	hasAllow := allow.Exists() && len(allow.Array()) > 0
+	hasAllowRules := allowRules.Exists() && len(allowRules.Array()) > 0
+	if !hasAllow && !hasAllowRules {
+		return errors.New("allow or allow_rules is required")
 	}
 
-	for _, item := range allow.Array() {
-		config.allow = append(config.allow, item.String())
+	// 解析 allow
+	if hasAllow {
+		for _, item := range allow.Array() {
+			config.allow = append(config.allow, item.String())
+		}
 	}
+
+	// 解析 allow_rules
+	if hasAllowRules {
+		for _, item := range allowRules.Array() {
+			name := item.Get("name")
+			if !name.Exists() || name.String() == "" {
+				return errors.New("allow_rules: name is required")
+			}
+			rule := AllowRule{
+				Name: name.String(),
+			}
+			if vts := item.Get("valid_time_start"); vts.Exists() {
+				rule.ValidTimeStart = vts.String()
+			}
+			if vte := item.Get("valid_time_end"); vte.Exists() {
+				rule.ValidTimeEnd = vte.String()
+			}
+			if et := item.Get("expire_time"); et.Exists() {
+				rule.ExpireTime = et.String()
+			}
+			// valid_time_start 和 valid_time_end 必须成对出现
+			if (rule.ValidTimeStart != "") != (rule.ValidTimeEnd != "") {
+				return errors.New("allow_rules: valid_time_start and valid_time_end must be configured together")
+			}
+			config.allowRules = append(config.allowRules, rule)
+		}
+	}
+
 	ruleSet = true
 
 	return nil
@@ -277,7 +328,7 @@ func parseOverrideRuleConfig(json gjson.Result, global KeyAuthConfig, config *Ke
 //   - 若有至少一个 domain/route 配置该插件：则遵循 (2*)
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config KeyAuthConfig, log log.Log) types.Action {
 	var (
-		noAllow            = len(config.allow) == 0 // 未配置 allow 列表，表示插件在该 domain/route 未生效
+		noAllow            = len(config.allow) == 0 && len(config.allowRules) == 0 // 未配置 allow 和 allow_rules 列表，表示插件在该 domain/route 未生效
 		globalAuthNoSet    = config.globalAuth == nil
 		globalAuthSetTrue  = !globalAuthNoSet && *config.globalAuth
 		globalAuthSetFalse = !globalAuthNoSet && !*config.globalAuth
@@ -342,7 +393,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config KeyAuthConfig, log log
 
 	// 全局生效，但当前 domain/route 配置了 allow 列表
 	if globalAuthSetTrue && !noAllow {
-		if !contains(config.allow, name) {
+		if !isConsumerAllowed(config, name, log) {
 			log.Warnf("consumer %q is not allowed", name)
 			return deniedUnauthorizedConsumer()
 		}
@@ -352,8 +403,8 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config KeyAuthConfig, log log
 
 	// 非全局生效
 	if globalAuthSetFalse || (globalAuthNoSet && ruleSet) {
-		if !noAllow { // 配置了 allow 列表
-			if !contains(config.allow, name) {
+		if !noAllow { // 配置了 allow 或 allow_rules 列表
+			if !isConsumerAllowed(config, name, log) {
 				log.Warnf("consumer %q is not allowed", name)
 				return deniedUnauthorizedConsumer()
 			}
@@ -392,6 +443,92 @@ func contains(arr []string, item string) bool {
 		if i == item {
 			return true
 		}
+	}
+	return false
+}
+
+// parseTimeString 解析时间字符串，支持 "HH:mm" 和 "HH:mm:ss" 两种格式
+func parseTimeString(s string) (hour, minute int, err error) {
+	t, err := time.Parse("15:04", s)
+	if err != nil {
+		t, err = time.Parse("15:04:05", s)
+		if err != nil {
+			return 0, 0, fmt.Errorf("invalid time format: %q", s)
+		}
+	}
+	return t.Hour(), t.Minute(), nil
+}
+
+// checkAllowRule 检查消费者是否在 allow_rules 中且满足时间约束
+func checkAllowRule(rules []AllowRule, name string, log log.Log) bool {
+	for _, rule := range rules {
+		if rule.Name != name {
+			continue
+		}
+		// 找到了匹配的 rule，检查时间约束
+		now := time.Now()
+
+		// 检查 expire_time
+		if rule.ExpireTime != "" {
+			expireTime, err := time.Parse("2006-01-02 15:04:05", rule.ExpireTime)
+			if err != nil {
+				log.Warnf("allow_rules: invalid expire_time format %q for consumer %q", rule.ExpireTime, name)
+				return false
+			}
+			if now.After(expireTime) {
+				log.Infof("consumer %q authorization expired at %s", name, rule.ExpireTime)
+				return false
+			}
+		}
+
+		// 检查 valid_time_start / valid_time_end（每日时间窗口）
+		if rule.ValidTimeStart != "" && rule.ValidTimeEnd != "" {
+			startH, startM, err := parseTimeString(rule.ValidTimeStart)
+			if err != nil {
+				log.Warnf("allow_rules: invalid valid_time_start %q for consumer %q", rule.ValidTimeStart, name)
+				return false
+			}
+			endH, endM, err := parseTimeString(rule.ValidTimeEnd)
+			if err != nil {
+				log.Warnf("allow_rules: invalid valid_time_end %q for consumer %q", rule.ValidTimeEnd, name)
+				return false
+			}
+
+			nowMinutes := now.Hour()*60 + now.Minute()
+			startMinutes := startH*60 + startM
+			endMinutes := endH*60 + endM
+
+			if startMinutes <= endMinutes {
+				// 正常时间窗口：09:00-18:00
+				if nowMinutes < startMinutes || nowMinutes >= endMinutes {
+					log.Infof("consumer %q outside valid time window %s-%s", name, rule.ValidTimeStart, rule.ValidTimeEnd)
+					return false
+				}
+			} else {
+				// 跨午夜时间窗口：22:00-06:00
+				if nowMinutes < startMinutes && nowMinutes >= endMinutes {
+					log.Infof("consumer %q outside valid time window %s-%s (cross-midnight)", name, rule.ValidTimeStart, rule.ValidTimeEnd)
+					return false
+				}
+			}
+		}
+
+		// 所有约束都通过
+		return true
+	}
+	// 在 allow_rules 中找不到该消费者
+	return false
+}
+
+// isConsumerAllowed 检查消费者是否被授权（同时检查 allow 和 allow_rules）
+func isConsumerAllowed(config KeyAuthConfig, name string, log log.Log) bool {
+	// 1. 先检查 allow 列表（简单字符串匹配）
+	if contains(config.allow, name) {
+		return true
+	}
+	// 2. 再检查 allow_rules（带时间约束）
+	if len(config.allowRules) > 0 {
+		return checkAllowRule(config.allowRules, name, log)
 	}
 	return false
 }

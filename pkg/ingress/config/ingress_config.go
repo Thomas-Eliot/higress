@@ -1259,6 +1259,19 @@ func (m *IngressConfig) mergeShardedConfigMaps(obj *higressext.WasmPlugin) {
 					} else if existingAllow == nil && newAllow != nil {
 						existingRule.Config.Fields["allow"] = newAllow
 					}
+
+					// 新增：合并 allow_rules（与 allow 类似，但是 object 数组）
+					existingAllowRules := existingRule.Config.Fields["allow_rules"]
+					newAllowRules := allowRule.Config.Fields["allow_rules"]
+					if existingAllowRules != nil && newAllowRules != nil {
+						existingList := existingAllowRules.GetListValue()
+						newList := newAllowRules.GetListValue()
+						if existingList != nil && newList != nil {
+							existingList.Values = append(existingList.Values, newList.Values...)
+						}
+					} else if existingAllowRules == nil && newAllowRules != nil {
+						existingRule.Config.Fields["allow_rules"] = newAllowRules
+					}
 				}
 				if sw := findSwitchByIngress(switchRules, ingressName); sw != nil && isBoolValueTrue(sw.ConfigDisable) {
 					existingRule.ConfigDisable = &wrappers.BoolValue{Value: true}
@@ -1395,8 +1408,9 @@ func matchRuleScopeEquals(a, b *higressext.MatchRule) bool {
 
 func mergeMatchRulesByIngress(rawRules []interface{}) []*higressext.MatchRule {
 	type routeAllow struct {
-		ingress string
-		allows  []string
+		ingress    string
+		allows     []string
+		allowRules []interface{} // 新增：保留原始 object 结构
 	}
 	routeMap := make(map[string]*routeAllow)
 
@@ -1424,9 +1438,11 @@ func mergeMatchRulesByIngress(rawRules []interface{}) []*higressext.MatchRule {
 		}
 
 		var allows []string
+		var allowRules []interface{}
 		if configRaw, ok := ruleMap["config"]; ok {
 			configMap := toStringInterfaceMap(configRaw)
 			if configMap != nil {
+				// 解析 allow
 				if allowRaw, ok := configMap["allow"]; ok {
 					if allowList, ok := allowRaw.([]interface{}); ok {
 						for _, a := range allowList {
@@ -1434,35 +1450,53 @@ func mergeMatchRulesByIngress(rawRules []interface{}) []*higressext.MatchRule {
 						}
 					}
 				}
+				// 新增：解析 allow_rules
+				if allowRulesRaw, ok := configMap["allow_rules"]; ok {
+					if rulesList, ok := allowRulesRaw.([]interface{}); ok {
+						allowRules = append(allowRules, rulesList...)
+					}
+				}
 			}
 		}
 
 		if existing, ok := routeMap[ingressName]; ok {
 			existing.allows = append(existing.allows, allows...)
+			existing.allowRules = append(existing.allowRules, allowRules...) // 新增
 		} else {
-			routeMap[ingressName] = &routeAllow{ingress: ingressName, allows: allows}
+			routeMap[ingressName] = &routeAllow{ingress: ingressName, allows: allows, allowRules: allowRules} // 新增
 		}
 	}
 
 	var result []*higressext.MatchRule
 	for _, ra := range routeMap {
-		allowValues := make([]*_struct.Value, 0, len(ra.allows))
-		for _, a := range ra.allows {
-			allowValues = append(allowValues, &_struct.Value{
-				Kind: &_struct.Value_StringValue{StringValue: a},
-			})
+		configFields := map[string]*_struct.Value{}
+
+		// 原有：allow
+		if len(ra.allows) > 0 {
+			allowValues := make([]*_struct.Value, 0, len(ra.allows))
+			for _, a := range ra.allows {
+				allowValues = append(allowValues, &_struct.Value{
+					Kind: &_struct.Value_StringValue{StringValue: a},
+				})
+			}
+			configFields["allow"] = &_struct.Value{
+				Kind: &_struct.Value_ListValue{
+					ListValue: &_struct.ListValue{Values: allowValues},
+				},
+			}
 		}
+
+		// 新增：allow_rules
+		if len(ra.allowRules) > 0 {
+			allowRulesValue := interfaceToStructValue(ra.allowRules)
+			if allowRulesValue != nil {
+				configFields["allow_rules"] = allowRulesValue
+			}
+		}
+
 		rule := &higressext.MatchRule{
 			Ingress: []string{ra.ingress},
-			Config: &_struct.Struct{
-				Fields: map[string]*_struct.Value{
-					"allow": {
-						Kind: &_struct.Value_ListValue{
-							ListValue: &_struct.ListValue{Values: allowValues},
-						},
-					},
-				},
-			},
+			Config:  &_struct.Struct{Fields: configFields},
 		}
 		result = append(result, rule)
 	}
