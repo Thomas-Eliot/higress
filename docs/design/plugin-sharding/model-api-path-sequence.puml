@@ -1,0 +1,178 @@
+@startuml Model API Path 处理流程 (OpenAI Provider)
+!theme plain
+skinparam sequenceMessageAlign center
+skinparam maxMessageSize 200
+
+title Model API Path 处理流程 — ai-proxy type=openai\n（含 WasmPlugin 配置加载 & 数据面 Path 转换）
+
+actor "Client" as client
+participant "Higress\n(Envoy/Istio)" as envoy
+participant "model-router\n(WASM Plugin)" as router
+participant "ai-proxy\n(WASM Plugin)" as proxy
+participant "openaiProvider" as provider
+participant "Upstream LLM\n(api.openai.com\n或 customDomain)" as upstream
+
+== WasmPlugin 配置加载阶段（启动/热更新时） ==
+
+[-> proxy : WasmPlugin CR 配置下发\n(parseOverrideRuleConfig)
+
+activate proxy
+
+proxy -> proxy : pluginConfig.FromJson(json)\n解析 provider type = "openai"\n解析 openaiCustomUrl (可选)
+
+proxy -> provider : openaiProviderInitializer.CreateProvider(config)
+activate provider
+
+provider -> provider : DefaultCapabilities() 初始化 path mapping:\n{\n  "chatCompletion": "/v1/chat/completions",\n  "completion": "/v1/completions",\n  "embeddings": "/v1/embeddings",\n  "imageGeneration": "/v1/images/generations",\n  "audioSpeech": "/v1/audio/speech",\n  "files": "/v1/files",\n  "batches": "/v1/batches",\n  "models": "/v1/models",\n  "responses": "/v1/responses",\n  "fineTuningJobs": "/v1/fine_tuning/jobs",\n  "videos": "/v1/videos",\n  ... (30+ API paths)\n}
+
+alt openaiCustomUrl 为空
+    provider -> provider : config.setDefaultCapabilities(\n  DefaultCapabilities())\n直接使用标准 OpenAI path mapping
+else openaiCustomUrl 已配置 (如 "https://my-proxy.com/custom/api")
+    provider -> provider : 解析 customUrl:\ncustomDomain = "my-proxy.com"\ncustomPath = "/custom/api"
+
+    alt isDirectPath(customPath) = true\n(customPath 本身是标准接口路径后缀)
+        provider -> provider : capabilities 保持不变\n运行时直接用 customPath 覆写
+    else isDirectPath(customPath) = false\n(customPath 是自定义前缀)
+        provider -> provider : 重写所有 capabilities:\nfor each (apiName, stdPath):\n  capabilities[apiName] =\n    path.Join(customPath, trimPrefix(stdPath, "/v1"))\n\n示例:\n  chatCompletion → "/custom/api/chat/completions"\n  embeddings → "/custom/api/embeddings"\n  files → "/custom/api/files"
+    end
+end
+
+provider -> provider : config.setDefaultCapabilities(capabilities)\n将 mapping 存入 config.capabilities\n(后续请求直接查表，无需重复计算)
+
+provider --> proxy : 返回 openaiProvider 实例\n(含 config.capabilities, customDomain,\n customPath, isDirectCustomPath)
+deactivate provider
+
+proxy -> proxy : 配置加载完成\nprovider 实例和 capabilities\n缓存在内存中
+deactivate proxy
+
+note over proxy, provider
+  **capabilities 数据结构 (map[string]string):**
+  在 WasmPlugin 配置加载时一次性计算完成，
+  后续每个请求直接查表获取目标 path，
+  避免运行时重复计算。
+end note
+
+== 请求处理阶段 ==
+
+client -> envoy : POST /v1/chat/completions\n{"model":"qwen/qwen-max", ...}
+
+== ① Ingress 路由匹配 ==
+
+envoy -> envoy : Ingress 路由匹配\npath predicate: prefix "/"\n匹配到 ai-route-xxx
+
+== ② model-router 插件 ==
+
+envoy -> router : onHttpRequestHeaders
+
+router -> router : 检查 path suffix 匹配\n"/v1/chat/completions" ∈ enableOnPathSuffix
+
+router -> router : onHttpRequestBody\n解析 model = "qwen/qwen-max"\n拆分: provider="qwen", model="qwen-max"\n设置 Header: x-higress-llm-provider=qwen\n重写 body.model = "qwen-max"
+
+router --> envoy : 返回
+
+== ③ ai-proxy 插件 — 请求头处理 ==
+
+envoy -> proxy : onHttpRequestHeader
+
+proxy -> proxy : initContext()\n保存 original_path = "/v1/chat/completions"\n保存 original_host, original_auth
+
+proxy -> proxy : getApiName(path)\n后缀匹配 pathSuffixToApiName:\n"/v1/chat/completions"\n→ apiName = ApiNameChatCompletion
+
+proxy -> proxy : 协议转换检查:\napiName ≠ AnthropicMessages\n→ 无需协议转换，继续
+
+== ④ Provider Path 重写 (核心) ==
+
+proxy -> provider : provider.OnRequestHeaders(ctx, apiName)
+activate provider
+
+provider -> provider : handleRequestHeaders(provider, ctx, apiName)
+
+group Step 1: basePath 处理
+    provider -> provider : basePath 为空 → 跳过
+    note right: 若配置了 basePath:\nremovePrefix: 去掉前缀\nprepend: 拼接前缀
+end
+
+group Step 2: TransformRequestHeaders (OpenAI 特定逻辑)
+    alt isDirectCustomPath = true
+        provider -> provider : 直接覆写 path = customPath\n(customPath 本身就是目标接口路径)
+    else isDirectCustomPath = false (常规情况)
+        provider -> provider : **查表 config.capabilities:**\ncapabilities["chatCompletion"]\n= "/v1/chat/completions"\n(或 customUrl 模式下的重写路径)\n\nOverwriteRequestPathHeaderByCapability(\n  headers, apiName, capabilities)\n→ headers[":path"] = capabilities[apiName]
+    end
+
+    provider -> provider : 设置 Host:\ncustomDomain 或 "api.openai.com"
+
+    provider -> provider : 设置 Authorization:\napiTokens → "Bearer <token>"
+end
+
+group Step 3: providerBasePath 拼接
+    provider -> provider : providerBasePath 为空 → 跳过
+end
+
+group Step 4: providerDomain 覆写
+    provider -> provider : providerDomain 为空 → 跳过\n(已在 TransformRequestHeaders 中设置)
+end
+
+provider --> proxy : 返回 (path 已重写为目标路径)
+deactivate provider
+
+== ⑤ 请求体处理 ==
+
+proxy -> proxy : onHttpRequestBody\ndefaultTransformRequestBody():\n- model mapping (若配置了 modelMapping)\n- 检测 stream 模式
+
+proxy -> proxy : OverwriteRequestPathByCapability()\n动态参数替换 (如有):\n"/v1/files/{file_id}" → "/v1/files/abc123"
+
+proxy -> proxy : saveContextsToHeaders()\n保存 X-Original-Path / X-Original-Host
+
+proxy --> envoy : 返回最终请求
+
+== ⑥ 转发到上游 ==
+
+envoy -> upstream : 转发请求:\nPath: /v1/chat/completions\nHost: api.openai.com\nAuthorization: Bearer sk-xxx\nBody: {"model":"qwen-max", ...}
+
+upstream --> envoy : Response (SSE/JSON)
+
+envoy -> proxy : onHttpResponseHeaders/Body
+proxy --> envoy : 响应透传 (OpenAI 格式无需转换)
+
+envoy --> client : Response
+
+== Path 转换总结 ==
+
+note over client, upstream
+  **OpenAI Provider — Path 转换链路:**
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │ **配置加载时 (一次性):**                                          │
+  │                                                                 │
+  │ CreateProvider() → DefaultCapabilities() → setDefaultCapabilities│
+  │                                                                 │
+  │ 生成 capabilities map:                                           │
+  │   chatCompletion  → /v1/chat/completions                        │
+  │   embeddings      → /v1/embeddings                              │
+  │   imageGeneration → /v1/images/generations                      │
+  │   ...                                                           │
+  │                                                                 │
+  │ 若有 customUrl (非 directPath):                                  │
+  │   chatCompletion  → /custom/api/chat/completions                │
+  │   embeddings      → /custom/api/embeddings                      │
+  │   ...                                                           │
+  └─────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │ **每次请求时 (查表):**                                            │
+  │                                                                 │
+  │ 客户端:  POST /v1/chat/completions                               │
+  │    ↓                                                            │
+  │ getApiName(path) → "chatCompletion"                             │
+  │    ↓                                                            │
+  │ TransformRequestHeaders:                                        │
+  │   capabilities["chatCompletion"] → 目标 path                    │
+  │    ↓                                                            │
+  │ 最终:   POST /v1/chat/completions → api.openai.com              │
+  │                                                                 │
+  │ (customUrl 模式):                                                │
+  │ 最终:   POST /custom/api/chat/completions → my-proxy.com        │
+  └─────────────────────────────────────────────────────────────────┘
+end note
+
+@enduml
