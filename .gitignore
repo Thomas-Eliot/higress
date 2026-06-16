@@ -17,3 +17,11 @@ target/
 tools/hack/cluster.conf
 envoy/1.20
 istio/1.12
+
+# 本地构建产物 / 测试草稿 / 参考资料 / 工具配置（不入库）
+/higress
+/ls-test/
+/.docker-env-file
+/csb2-go-control-plane/
+/reference_repositories/
+/.kiro/
