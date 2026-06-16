@@ -32,5 +32,5 @@
 	branch = main
 [submodule "ratelimit-quota-server"]
 	path = ratelimit-quota-server
-	url = git@gitlab.alibaba-inc.com:Ingress/ratelimit-quota-server.git
+	url = git@gitlab.alibaba-inc.com:csb2/ratelimit-quota-server
 	branch = master

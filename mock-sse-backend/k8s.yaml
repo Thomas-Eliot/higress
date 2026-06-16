@@ -1,0 +1,124 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mock-backend
+  namespace: ls-test
+  labels:
+    app: mock-backend
+spec:
+  containers:
+  - name: mock-backend
+    image: registry.cn-hangzhou.aliyuncs.com/aliyun_China/python:3.11-slim
+    command: ["python", "-c"]
+    args:
+    - |
+      import json, uuid, time, threading
+      from http.server import HTTPServer, BaseHTTPRequestHandler
+
+      message_store = {}
+      store_lock = threading.Lock()
+
+      def simulate_kafka_produce(message_id, prompt):
+          def produce():
+              time.sleep(5)
+              response = {
+                  "id": f"chatcmpl-{message_id[:8]}",
+                  "object": "chat.completion",
+                  "model": "mock-model",
+                  "choices": [{"index": 0, "message": {"role": "assistant", "content": f"Mock response for: {prompt}"}, "finish_reason": "stop"}],
+                  "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+              }
+              with store_lock:
+                  message_store[message_id] = response
+              print(f"[Kafka] Message {message_id} produced", flush=True)
+          threading.Thread(target=produce, daemon=True).start()
+
+      class Handler(BaseHTTPRequestHandler):
+          def do_POST(self):
+              if self.path in ("/chat/completions", "/v1/chat/completions"):
+                  cl = int(self.headers.get("Content-Length", 0))
+                  body = self.rfile.read(cl) if cl > 0 else b"{}"
+                  try:
+                      prompt = json.loads(body).get("messages", [{}])[-1].get("content", "hello")
+                  except: prompt = "hello"
+                  mid = str(uuid.uuid4())
+                  simulate_kafka_produce(mid, prompt)
+                  self.send_response(200)
+                  self.send_header("Content-Type", "application/json")
+                  self.end_headers()
+                  self.wfile.write(json.dumps({"messageId": mid, "status": "processing"}).encode())
+                  print(f"[POST] Created {mid}", flush=True)
+              else:
+                  self.send_response(404)
+                  self.end_headers()
+
+          def do_GET(self):
+              if self.path.startswith("/messages/"):
+                  mid = self.path.split("/messages/")[1].strip("/")
+                  print(f"[GET] Waiting for {mid}", flush=True)
+                  waited = 0
+                  while waited < 30:
+                      with store_lock:
+                          if mid in message_store:
+                              resp = message_store.pop(mid)
+                              self.send_response(200)
+                              self.send_header("Content-Type", "application/json")
+                              self.end_headers()
+                              self.wfile.write(json.dumps(resp).encode())
+                              print(f"[GET] Returned {mid}", flush=True)
+                              return
+                      time.sleep(0.5)
+                      waited += 0.5
+                  self.send_response(408)
+                  self.send_header("Content-Type", "application/json")
+                  self.end_headers()
+                  self.wfile.write(json.dumps({"error": "timeout"}).encode())
+              elif self.path == "/health":
+                  self.send_response(200)
+                  self.end_headers()
+                  self.wfile.write(b"ok")
+              else:
+                  self.send_response(404)
+                  self.end_headers()
+
+      print("Mock backend on :8080", flush=True)
+      HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+    ports:
+    - containerPort: 8080
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: 8080
+      initialDelaySeconds: 3
+      periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-backend
+  namespace: ls-test
+spec:
+  selector:
+    app: mock-backend
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mock-backend
+  namespace: ls-test
+spec:
+  ingressClassName: ls-test
+  rules:
+  - host: mock-backend.io
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: mock-backend
+            port:
+              number: 8080

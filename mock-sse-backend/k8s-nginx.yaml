@@ -1,0 +1,93 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mock-backend-config
+  namespace: ls-test
+data:
+  nginx.conf: |
+    worker_processes 1;
+    events { worker_connections 64; }
+    http {
+      server {
+        listen 80;
+
+        # Immediate JSON response (baseline test)
+        location /instant/messages/ {
+          default_type application/json;
+          return 200 '{"id":"chatcmpl-instant","object":"chat.completion","model":"mock","choices":[{"index":0,"message":{"role":"assistant","content":"instant response"},"finish_reason":"stop"}]}';
+        }
+
+        # Delayed response: nginx proxies to a backend that sleeps
+        # We simulate delay using a subrequest + proxy_read_timeout
+        # But simpler: use Lua or just a static response for now
+
+        # Static response at /messages/test123 (no delay)
+        location /messages/ {
+          default_type application/json;
+          return 200 '{"id":"chatcmpl-delayed","object":"chat.completion","model":"mock","choices":[{"index":0,"message":{"role":"assistant","content":"delayed response"},"finish_reason":"stop"}]}';
+        }
+
+        location /health {
+          return 200 'ok';
+        }
+      }
+    }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mock-backend
+  namespace: ls-test
+  labels:
+    app: mock-backend
+spec:
+  containers:
+  - name: mock-backend
+    image: registry.cn-shanghai.aliyuncs.com/daofeng/nginx:alpine
+    ports:
+    - containerPort: 80
+    volumeMounts:
+    - name: config
+      mountPath: /etc/nginx/nginx.conf
+      subPath: nginx.conf
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: 80
+      initialDelaySeconds: 2
+      periodSeconds: 3
+  volumes:
+  - name: config
+    configMap:
+      name: mock-backend-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-backend
+  namespace: ls-test
+spec:
+  selector:
+    app: mock-backend
+  ports:
+  - port: 80
+    targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mock-backend
+  namespace: ls-test
+spec:
+  ingressClassName: ls-test
+  rules:
+  - host: mock-backend.io
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: mock-backend
+            port:
+              number: 80
