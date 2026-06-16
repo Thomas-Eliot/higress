@@ -37,11 +37,19 @@ RATELIMIT_CM="$(echo $CLUSTER_ID | tr A-Z a-z)-ratelimit-config"  # = kubernetes
 ## 2. Controller patch（一次性，helm upgrade 后需重打）
 
 ```bash
-# 2.1 把 --clusterID args 改成大写
+# 2.1 【条件步骤，多数部署可跳过】仅当 higress 容器存在一个与网关 ISTIO_META_CLUSTER_ID
+#     不一致（如小写 kubernetes）的 --clusterID arg 时才需要；否则两侧缺省都是 Kubernetes，跳过。
+#     （此步与 quota 命名无关，只为网关↔控制器 JWT 鉴权链的 cluster-id 一致——详见下方"为什么"）
 IDX=$(kubectl get deploy -n $NS higress-controller -o json | \
-  python3 -c 'import json,sys; d=json.load(sys.stdin); a=d["spec"]["template"]["spec"]["containers"][0]["args"]; print([i for i,x in enumerate(a) if "clusterID" in x][0])')
-kubectl patch deploy higress-controller -n $NS --type=json \
-  -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args/${IDX}\",\"value\":\"--clusterID=${CLUSTER_ID}\"}]"
+  python3 -c 'import json,sys; d=json.load(sys.stdin); a=d["spec"]["template"]["spec"]["containers"][0].get("args",[]); ix=[i for i,x in enumerate(a) if "clusterID" in x]; print(ix[0] if ix else -1)')
+if [ "$IDX" != "-1" ]; then
+  # 校验网关侧取值，保持一致（默认 Kubernetes）
+  GW_CID=$(kubectl get deploy -n $NS higress-gateway -o jsonpath='{range .spec.template.spec.containers[*].env[?(@.name=="ISTIO_META_CLUSTER_ID")]}{.value}{end}')
+  kubectl patch deploy higress-controller -n $NS --type=json \
+    -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args/${IDX}\",\"value\":\"--clusterID=${GW_CID:-$CLUSTER_ID}\"}]"
+else
+  echo "no --clusterID arg on higress container; skip 2.1 (两侧走缺省 Kubernetes)"
+fi
 
 # 2.2 必备 env
 kubectl set env -n $NS deploy/higress-controller -c higress \
@@ -56,9 +64,25 @@ kubectl delete pod -n $NS -l app=higress-controller
 
 > `QUOTA_GATEWAY_ENDPOINTS_NAME` 取值 = **Endpoints 资源含网关 envoy Pod IP 的 Service 名**。有 headless `envoy-hs` 用它；若该 ns 没有（如裸部署），用 `higress-gateway`（LB Service 的 Endpoints 即网关 Pod）。校验：`kubectl get endpoints -n $NS <name>` 有 Pod IP。
 
-**为什么**：
-- `--clusterID` args 优先级高于 env `CLUSTER_ID`，不对齐会导致 ConfigMap 名 / Redis domain 三方不一致
-- 不设 `QUOTA_GATEWAY_ENDPOINTS_NAME=envoy-hs`，controller 报 `envoy endpoints length is 0` 啥都不下发（`GetEndpointsName()` 用 `strings.Replace(features.ClusterName, "istio", "envoy-hs", 1)` 处理非 istio cluster-id 时返回原值）
+**为什么**（均已对 `external/istio` 源码核对，下方行号为该路径）：
+
+- **`--clusterID` 与 quota 命名无关，真正决定命名的是 `CLUSTER_ID` env**。ConfigMap 名 / Redis domain 三方都从 `features.ClusterName` 推导，而 `features.ClusterName = env.Register("CLUSTER_ID", "Kubernetes")`（`pilot/pkg/features/pilot.go:348`，缺省大写 `Kubernetes`）：
+  - ConfigMap 名 = `strings.ToLower(ClusterName + "-ratelimit-config")` → 小写 `kubernetes-ratelimit-config`（`quotarule.go:1824` 等）
+  - Redis domain = `TrimSuffix(ClusterName,"-istio") + "-quotarule"` → **保留大写** `Kubernetes-quotarule`（`quotarule.go:64-68,778`）
+
+  `--clusterID` flag 绑的是**另一个变量** `KubeOptions.ClusterID`（`pkg/cmd/server.go:121`），quota 代码从不读它，全仓也无任何处把它写回 `features.ClusterName`（已全量 grep 确认）。且 helm 默认 higress 容器（容器 0，controller 所在）**没有 `CLUSTER_ID` env**，故 `features.ClusterName` 恒为缺省 `Kubernetes`。
+
+  ⇒ 本节要保证的是：手写 Redis key 的 `${DOMAIN}`、挂载的 ConfigMap 名，与该缺省大小写（**domain 大写 K、ConfigMap 小写**）一致。改 `--clusterID` arg 对 quota 命名是 **no-op**。
+
+  - **`--clusterID` 真正影响的是网关↔控制器的 JWT 鉴权链（与 quota 命名无关）**：它绑到 `KubeOptions.ClusterID`，喂给 `NewKubeJWTAuthenticator`（`pkg/bootstrap/server.go:396`）。网关 pilot-agent 连 higress-controller xDS/CA（`:15012`/`:15010`）时，把自己的 `ISTIO_META_CLUSTER_ID` 作为 `clusterid` header 上送；`getKubeClient` 要求 `a.clusterID(=控制器 --clusterID，缺省 "Kubernetes") == 该 header`，否则因 higress 的 `remoteKubeClientGetter==nil` 返回 nil → 鉴权失败「could not get cluster X's kube client」→ 网关拿不到任何配置（`external/istio/.../kubeauth/kube_jwt.go:117-187`）。
+  - **`ISTIO_META_CLUSTER_ID` 缺省 = `clusterName | default "Kubernetes"`**（`helm/core/templates/_pod.tpl:118-119`），与控制器 `--clusterID` 缺省一致，所以**默认就匹配**。
+  - ⚠️ **实测（ls-test 在跑的栈）：higress 容器根本没有 `--clusterID` arg**（两侧都走缺省 `Kubernetes`，gateway `ISTIO_META_CLUSTER_ID=Kubernetes`，鉴权正常）。故 §2.1 的 IDX patch 在此类部署里**找不到该 arg 会直接抛 IndexError**。⇒ **仅当**你的 chart 注入了一个**与网关 `ISTIO_META_CLUSTER_ID` 不一致（如小写 kubernetes）的 `--clusterID`** 时才需要这步；否则跳过 §2.1。
+
+- **必须设 `QUOTA_GATEWAY_ENDPOINTS_NAME=envoy-hs`**，否则 controller 报 `envoy endpoints length is 0` 啥都不下发。`GetEndpointsName()` 缺省走 `strings.Replace(features.ClusterName, "istio", "envoy-hs", 1)`（`quotarule.go:54-63`），cluster-id 不含 `istio` 时原样返回 `Kubernetes`，去查名为 `Kubernetes` 的 Endpoints → nil → length 0。
+
+- **必须设 `WATCH_RESOURCES_BY_NAMESPACE_FOR_PRIMARY_CLUSTER=$NS`**（默认空串，`pkg/ali/features/pilot.go:11`）。它是 `GetEnvoyEndpointLen()` 里 `EndpointClient.Get(name, ns)` 的 **namespace 实参**（`quotarule.go:1799`）；endpoints informer 缓存对象在 PodNamespace=`$NS`，env 为空则用 `""` 去查 → 对不上 → 同样 length 0。且 `onEndpointEvent` 用它过滤事件（`o.GetNamespace() != 该值 → return`，`controller.go:103-105`），为空时每个 endpoint 事件被丢弃、连重试都没有。
+
+- **§2.3 为何改完 env 还要删 pod**：`GetEndpointsName()` 用 `sync.Once` 记忆化、endpoints informer 的 `FieldSelector` 在 `NewController` 时一次性烧死（`controller.go:50,77-80`）；`Run()` 只跑 queue、**无周期 resync**（`controller.go:307-309`）；QuotaRule 用 `NewDelayedInformer`（等 CRD 发现才回放），而 `onEndpointEvent` 在「当前无 QuotaRule CR」时早退（`controller.go:116-119`）。若 endpoints sync / 正确 name 早于 CR 就绪那次 Conversion 看到 length 0 即 `return nil`，此后既无 resync、endpoint 事件又被「无 CR」吞掉 → **永久停在 length 0**。删 pod = 全新进程按「endpoints 已在 + CR 已在」顺序重新 warmup，回放才产出成功推送。
 
 校验：
 ```bash
