@@ -49,7 +49,12 @@ kubectl set env -n $NS deploy/higress-controller -c higress \
   WATCH_RESOURCES_BY_NAMESPACE_FOR_PRIMARY_CLUSTER=$NS
 
 kubectl rollout status -n $NS deploy/higress-controller --timeout=180s
+
+# 2.3 ⚠️ 改完 env 后必须删 controller pod，让 endpoints informer 重新 warmup（见下方"为什么"）
+kubectl delete pod -n $NS -l app=higress-controller
 ```
+
+> `QUOTA_GATEWAY_ENDPOINTS_NAME` 取值 = **Endpoints 资源含网关 envoy Pod IP 的 Service 名**。有 headless `envoy-hs` 用它；若该 ns 没有（如裸部署），用 `higress-gateway`（LB Service 的 Endpoints 即网关 Pod）。校验：`kubectl get endpoints -n $NS <name>` 有 Pod IP。
 
 **为什么**：
 - `--clusterID` args 优先级高于 env `CLUSTER_ID`，不对齐会导致 ConfigMap 名 / Redis domain 三方不一致
@@ -141,16 +146,62 @@ kubectl rollout status -n $NS deploy/higress-gateway --timeout=180s
 
 ## 7. 部署 quota-server
 
+> ⚠️ **先升级网关/控制器镜像到 quota-rule 形态**（helm 默认基线镜像如 `daofeng/*:2.1.12` 不含 `rate_limit_quota_apig` filter / 不认 QuotaRule CRD）：
+> ```bash
+> REG=registry.cn-shanghai.aliyuncs.com/daofeng
+> kubectl set image -n $NS deploy/higress-controller higress=$REG/higress:quota-rule discovery=$REG/pilot:quota-rule
+> kubectl set image -n $NS deploy/higress-gateway   higress-gateway=$REG/gateway:quota-rule
+> kubectl rollout status -n $NS deploy/higress-controller --timeout=180s
+> kubectl rollout status -n $NS deploy/higress-gateway   --timeout=180s
+> ```
+
+### 7.1 quota-server 容器已存在（helm 部署过）→ 仅换镜像
+
 ```bash
 QIDX=$(kubectl get deploy -n $NS higress-gateway -o json | \
   python3 -c 'import json,sys; d=json.load(sys.stdin); print([i for i,c in enumerate(d["spec"]["template"]["spec"]["containers"]) if c["name"]=="quota-server"][0])')
-
 kubectl set image -n $NS deploy/higress-gateway quota-server=$QUOTA_SERVER_IMAGE
-
 kubectl patch deploy higress-gateway -n $NS --type=json \
   -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/${QIDX}/imagePullPolicy\",\"value\":\"Always\"}]"
-
 kubectl rollout status -n $NS deploy/higress-gateway --timeout=180s
+```
+
+### 7.2 quota-server 容器不存在（裸部署）→ 手动加 sidecar
+
+helm 基线若未带 quota-server 容器（`kubectl get pod … -o jsonpath` 只看到 `higress-gateway nginx`），需手动 strategic patch 加入。**关键：用 `subPath` 把 ratelimit ConfigMap 的 `config.yaml` 精确覆盖到镜像自带的空默认配置文件**，否则 quota-server 读到空配置、报 `config file cannot have empty domain` 并回落 `localhost:6379`。RLQS cluster 固定 `STRICT_DNS → 127.0.0.1:8081`，故必须以 sidecar 形态跑在网关 Pod 内、监听 8081。
+
+```bash
+kubectl patch deploy higress-gateway -n $NS --type=strategic -p '{
+  "spec":{"template":{"spec":{
+    "containers":[{
+      "name":"quota-server",
+      "image":"registry.cn-shanghai.aliyuncs.com/daofeng/ratelimit-quota-server:clientid-unify-20260615",
+      "imagePullPolicy":"Always",
+      "ports":[{"containerPort":8081}],
+      "env":[
+        {"name":"SIDECAR_MOD","value":"gateway-1"},
+        {"name":"RUNTIME_ROOT","value":"/data/ratelimit-quota"},
+        {"name":"RUNTIME_SUBDIRECTORY","value":"config"},
+        {"name":"RUNTIME_APPDIRECTORY","value":"config"},
+        {"name":"RUNTIME_WATCH_ROOT","value":"true"},
+        {"name":"RUNTIME_IGNOREDOTFILES","value":"true"},
+        {"name":"ZONEINFO","value":"/usr/share/zoneinfo"},
+        {"name":"LOG_LEVEL","value":"info"},
+        {"name":"USE_STATSD","value":"false"}
+      ],
+      "volumeMounts":[{"name":"ratelimit-config","mountPath":"/data/ratelimit-quota/config/config.yaml","subPath":"config.yaml"}]
+    }],
+    "volumes":[{"name":"ratelimit-config","configMap":{"name":"'"$RATELIMIT_CM"'"}}]
+  }}}
+}'
+kubectl rollout status -n $NS deploy/higress-gateway --timeout=180s
+```
+> 注意 `$RATELIMIT_CM`（= `kubernetes-ratelimit-config`）需先由 QuotaRule CR 触发 controller 生成（见 §10）；若先于 CR 加 sidecar，挂载会失败，待 CR reconcile 出 ConfigMap 后再 `kubectl rollout restart`。
+
+校验：
+```bash
+kubectl logs -n $NS <gw-pod> -c quota-server | grep -iE "Redis URL|empty domain"
+# 期待：Redis URL: <data-redis> (from config file)；不期待：empty domain / localhost:6379
 ```
 
 **镜像选择**：必须用 immutable tag（不要 `:latest`，digest 历史飘动过）。当前推荐 `clientid-unify-20260615`，包含：
@@ -272,6 +323,42 @@ EOF
 
 **为什么是动态形态**：静态形态（无 `dimensions`）controller 走 legacy path **不生成 bucket_matchers**，envoy quota filter 没法 bucket request，限流逻辑空转。动态形态走 multi-dim path 生成 per-route override 含 bucket_matchers。
 
+### 10.1 ⭐ 控制台驱动（per-consumer 全局，不绑路由）→ 用 `application_scope: GLOBAL_DEFAULT`
+
+上面 §10 是 `ROUTE` 形态（默认，需 `target.routes`，按路由限流）。**控制台的配额是 per-consumer、实例全局、与路由无关**，应改用 `GLOBAL_DEFAULT`（HCM 级全局 bucket_matchers，**无 `target.routes`**），消费者 header 用鉴权注入的 `x-mse-consumer`：
+
+```bash
+kubectl apply -n $NS -f - <<EOF
+apiVersion: networking.istio.io/v1alpha3
+kind: QuotaRule
+metadata: { name: test-quota }
+spec:
+  redis_info: { redis_url: "${REDIS_HOST}:${REDIS_PORT}", redis_auth: "${REDIS_AUTH}" }
+  rules:
+    - application_scope: GLOBAL_DEFAULT          # 全局，无 target.routes
+      match:
+        - name: all-consumers
+          headers: { items: [{ name: x-mse-consumer, value: ".*", match_type: REGEX }] }
+      dimensions:
+        - short_name: cu                         # 必须与控制台 rl_dc:{domain}:cu_{id} 前缀一致
+          source: { request_header: x-mse-consumer }
+          priority: 100
+          limit:
+            dynamic: true
+            fallback: { requests_per_unit: 5, unit: DAY, quota_dimension: token }  # 设小，见下注
+EOF
+```
+
+| `application_scope` | 作用 | `target.routes` |
+|---|---|:---:|
+| `ROUTE`（默认） | per-route override | 需要 |
+| **`GLOBAL_DEFAULT`** | HCM 级全局 | **不需要** |
+| `GLOBAL_INFRASTRUCTURE` | 仅 redis_info/control | — |
+
+> ⚠️ **fallback 要设小**：配额降到约 limit 的 20%（降级阈值）后进 `[DEGRADED]`，envoy 改用此 `fallback`。fallback 设大（如 100000/month）会导致近限额时被 fallback 放行、永远到不了 429。
+> `unit` 枚举支持 `SECOND/MINUTE/HOUR/DAY/WEEK/MONTH/YEAR`，控制台日/周/月配额均可。
+> token 维度 429 需路由是 AI/Model 路由（网关 ai-statistics 从响应抽 token 用量上报），echo-server 只能测 `request` 维度。完整 console e2e 见 [console-driven-token-quota-e2e-20260616.md](./console-driven-token-quota-e2e-20260616.md)。
+
 ---
 
 ## 11. Redis 写动态配额
@@ -341,9 +428,27 @@ curl -s -o /dev/null -w "%{http_code}\n" -H "x-consumer: alice" http://$SLB_IP/e
 | listener 上 quota filter 不见 | controller global EnvoyFilter push 不稳 | 手工 apply 等价 K8s EnvoyFilter |
 | quota-server log `unknown bucket_id 'cu_alice'` | ConfigMap 改后 watcher 部分 reload | `kubectl delete pod` gateway 触发全量 reload |
 | 并发压测看到很多 400 | echo-server 后端在并发下返 400 | **改用串行测试**（见测试报告 §测试方法） |
+| 请求 200 但 quota-server 无 SyncCheck / filter 不在 HCM | controller 报 `envoy endpoints length is 0`（env 设了也报） | 删 controller pod warmup endpoints informer（§2.3）；确认 `QUOTA_GATEWAY_ENDPOINTS_NAME` 指向有 Pod IP 的 Service |
+| quota-server `config file cannot have empty domain` + 连 `localhost:6379` | ConfigMap 挂载路径差一层，读到镜像空默认 config.yaml | 用 **subPath** 覆盖到 `/data/ratelimit-quota/config/config.yaml`（§7.2） |
+| token 维度配额耗尽却不返 429（一直 200） | 近限额进 `[DEGRADED]`，envoy 用 CR `fallback`（设太大）放行 | CR `fallback` 设小（§10.1）；确认路由是 AI/Model 路由能抽 token |
+| 集群内 quota-server `dial tcp …:6379 i/o timeout` | 外部/云 Redis 未放通集群出口 | Redis 白名单加集群 NAT 出口 IP（见 §1 外部 Redis 注） |
 
 ---
 
-## 附录：完整脚本化方向
+## 附录 A：外部/共享 Redis（控制台联调推荐）
 
-把第 2-11 节命令塞进 `setup-quota-rule.sh`，变量化 `$NS` / `$CLUSTER_ID` / `$REDIS_*` / `$QUOTA_SERVER_IMAGE`，下次新 ns 一键拉起。
+控制台动态下发 per-consumer 配额，要求 **同一个 Redis 既被集群内 quota-server 读、又被控制台写**：
+- **集群侧**：QuotaRule CR `redis_info` + `higress-config` 的 `mcpServer.redis` 指向它，改完重启 gateway。
+- **控制台侧**：实例 `RedisConfig` 设为它（或留空走 higress-config 解析），`HigressRedisServiceResolver` 自动解析、无需 override。
+- **云 Redis（如阿里云 Redis）**：① Redis 白名单放通**集群 NAT 出口公网 IP**（否则 quota-server `i/o timeout`）；② `CONFIG SET notify-keyspace-events KEA`（否则 quota-server LRU 不失效，配额变更 ~10s 内不生效）。
+- 本地起控制台联调时，本机 6379 常被控制台自身会话 Redis 占用，**不要用 `quota.dataplane.redis-override=127.0.0.1`**，直接走云 Redis 公网 endpoint。
+
+实测见 [console-driven-token-quota-e2e-20260616.md](./console-driven-token-quota-e2e-20260616.md)。
+
+## 附录 B：自动化方向（待办）
+
+当前搭建仍是手工 kubectl，目标是消除：
+
+1. **Helm chart 化**：把 §7 的 quota-server sidecar、§3/§5 的网关 patch、§2 的 controller env 收敛进 helm 基线 values（`quotaServer.enabled` 开关 + sidecar 模板 + ConfigMap 挂载），新实例部署即带 quota 能力，免去手动 patch 与 warmup。
+2. **控制台触发下发**：QuotaRule CR（GLOBAL_DEFAULT 接线）+ ratelimit ConfigMap 由控制台在「启用配额」时按实例下发（复用现有 K8s 下发通道），per-consumer 配额继续走 Redis 动态写。即把 §10 的 CR 接线纳入控制台生命周期，而非人工预置。
+3. 过渡期可把第 2–10 节命令脚本化 `setup-quota-rule.sh`，变量化 `$NS`/`$CLUSTER_ID`/`$REDIS_*`/镜像 tag，新 ns 一键拉起。
