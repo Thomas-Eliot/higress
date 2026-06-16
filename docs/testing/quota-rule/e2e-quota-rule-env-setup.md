@@ -80,7 +80,11 @@ kubectl delete pod -n $NS -l app=higress-controller
 
 - **必须设 `QUOTA_GATEWAY_ENDPOINTS_NAME=envoy-hs`**，否则 controller 报 `envoy endpoints length is 0` 啥都不下发。`GetEndpointsName()` 缺省走 `strings.Replace(features.ClusterName, "istio", "envoy-hs", 1)`（`quotarule.go:54-63`），cluster-id 不含 `istio` 时原样返回 `Kubernetes`，去查名为 `Kubernetes` 的 Endpoints → nil → length 0。
 
-- **必须设 `WATCH_RESOURCES_BY_NAMESPACE_FOR_PRIMARY_CLUSTER=$NS`**（默认空串，`pkg/ali/features/pilot.go:11`）。它是 `GetEnvoyEndpointLen()` 里 `EndpointClient.Get(name, ns)` 的 **namespace 实参**（`quotarule.go:1799`）；endpoints informer 缓存对象在 PodNamespace=`$NS`，env 为空则用 `""` 去查 → 对不上 → 同样 length 0。且 `onEndpointEvent` 用它过滤事件（`o.GetNamespace() != 该值 → return`，`controller.go:103-105`），为空时每个 endpoint 事件被丢弃、连重试都没有。
+- **必须设 `WATCH_RESOURCES_BY_NAMESPACE_FOR_PRIMARY_CLUSTER=$NS`**（默认空串，`pkg/ali/features/pilot.go:11`）。**根因是 quota 移植代码里「informer 作用域」与「读取作用域」取自两个不同变量**，env 为空时二者分叉：
+  - **informer 作用域**来自 `NewController(client, ns)` 的 `ns` 实参，而 `ns := higressconfig.PodNamespace`（`pkg/bootstrap/server.go:223,246` → `controller.go:66,77-80`）——**自动**等于 controller pod 所在 ns（`$NS`），endpoints 缓存键是 `$NS/<endpoints>`。
+  - **读取作用域**走 `GetEnvoyEndpointLen()` 里 `EndpointClient.Get(GetEndpointsName(), WatchResourcesByNamespaceForPrimaryCluster)`（`quotarule.go:1821`），namespace 实参是**这个 env**。env 为空则按 `""` 查 → 命不中 `$NS/<endpoints>` 缓存 → length 0。`onEndpointEvent` 同样用它过滤事件（`o.GetNamespace() != 该值 → return`，`controller.go:104`），为空时每个 endpoint 事件被丢弃、连重试都没有。
+  - **为何「之前」不用设**：内部阿里版两者恒等（实例单 ns，且该 env 由 deployment 的 Downward API `fieldRef: metadata.namespace` 自动注入，operator 从不手设），故从不暴露；开源 higress 不带这段注入、env 默认空 → 两作用域分叉 → length 0。
+  - ⇒ **本质要求：让该 env 显式 = controller 的 PodNamespace（`$NS`），把读取作用域与 informer 作用域对齐**。另注意生成的 EnvoyFilter / ratelimit ConfigMap 也用它当 namespace（`quotarule.go:317,1870`），设成别的 ns 会让这俩资源落到错 namespace。
 
 - **§2.3 为何改完 env 还要删 pod**：`GetEndpointsName()` 用 `sync.Once` 记忆化、endpoints informer 的 `FieldSelector` 在 `NewController` 时一次性烧死（`controller.go:50,77-80`）；`Run()` 只跑 queue、**无周期 resync**（`controller.go:307-309`）；QuotaRule 用 `NewDelayedInformer`（等 CRD 发现才回放），而 `onEndpointEvent` 在「当前无 QuotaRule CR」时早退（`controller.go:116-119`）。若 endpoints sync / 正确 name 早于 CR 就绪那次 Conversion 看到 length 0 即 `return nil`，此后既无 resync、endpoint 事件又被「无 CR」吞掉 → **永久停在 length 0**。删 pod = 全新进程按「endpoints 已在 + CR 已在」顺序重新 warmup，回放才产出成功推送。
 
