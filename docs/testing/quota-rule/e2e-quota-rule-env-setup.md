@@ -357,7 +357,7 @@ apiVersion: networking.istio.io/v1alpha3
 kind: QuotaRule
 metadata: { name: test-quota }
 spec:
-  redis_info: { redis_url: "${REDIS_HOST}:${REDIS_PORT}", redis_auth: "${REDIS_AUTH}" }
+  redis_info: { redis_url: "${REDIS_HOST}:${REDIS_PORT}", redis_auth: "${REDIS_AUTH}", key_domain: "${DOMAIN}" }   # key_domain：Redis key rl_dc:<key_domain>:cu_* 的 domain 段，见下注
   rules:
     - application_scope: GLOBAL_DEFAULT          # 全局，无 target.routes
       match:
@@ -379,6 +379,7 @@ EOF
 | **`GLOBAL_DEFAULT`** | HCM 级全局 | **不需要** |
 | `GLOBAL_INFRASTRUCTURE` | 仅 redis_info/control | — |
 
+> 🆕 **`redis_info.key_domain`（实例隔离，见 [设计文档](../../design/quota-cluster-id/cluster-id-与实例隔离设计分析.md)）**：直接给出 Redis bucket key `rl_dc:<key_domain>:cu_*` 的 domain 段。控制器据此产出同一 `domain`（`quotarule.go#resolveQuotaDomain`：非空原样用，留空回落 `<instanceName>-quotarule`）。**契约：写 Redis 的一方（控制台 / 本节 §11 的 `${DOMAIN}`）必须用同一字符串**。多实例共享 Redis 时，每实例填各自的 instanceId 即隔离；cluster-id 保持默认 `Kubernetes`。控制台侧 `QuotaDomainResolver` 已改为直接以 `gwInstanceId` 声明 domain（不再反查 ConfigMap），故 console 驱动时 `key_domain` 应 = `gwInstanceId`。
 > ⚠️ **fallback 要设小**：配额降到约 limit 的 20%（降级阈值）后进 `[DEGRADED]`，envoy 改用此 `fallback`。fallback 设大（如 100000/month）会导致近限额时被 fallback 放行、永远到不了 429。
 > `unit` 枚举支持 `SECOND/MINUTE/HOUR/DAY/WEEK/MONTH/YEAR`，控制台日/周/月配额均可。
 > token 维度 429 需路由是 AI/Model 路由（网关 ai-statistics 从响应抽 token 用量上报），echo-server 只能测 `request` 维度。完整 console e2e 见 [console-driven-token-quota-e2e-20260616.md](./console-driven-token-quota-e2e-20260616.md)。

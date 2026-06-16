@@ -157,3 +157,31 @@ features.ClusterName = env.Register("CLUSTER_ID", "Kubernetes")   // pilot/pkg/f
 | SDS secret 资源名用 `features.ClusterName` | `external/istio/pilot/pkg/model/credentials/ali_resource.go:20-26` |
 
 相关运维 runbook：[`docs/testing/quota-rule/e2e-quota-rule-env-setup.md`](../../testing/quota-rule/e2e-quota-rule-env-setup.md) §2「为什么」（已据本分析改正归因）。
+
+---
+
+## 八、落地状态（2026-06-16）
+
+### 已完成并推送（higress 侧）
+
+| 仓库 / 分支 | commit | 内容 |
+|---|---|---|
+| `csb2/istio_api` `istio-1.19` | `b80b1489` | QuotaRule `redis_info.key_domain`（field 3）+ 重生成 pb.go（protoc-gen-go v1.36.11） |
+| `csb2/istio` `istio-1.19` | `426d2bce` | `resolveQuotaDomain()`：key_domain 非空原样作 domain，否则回落 `<instanceName>-quotarule`；贯穿 route override / HCM filter（`buildHTTPFilterWithDomain`）/ ratelimit ConfigMap 三处。保留既有导出签名（零测试改动） |
+| `csb2/higress-gateway` `apsara-main` | `6292d714`,`73769c38` | 上述子模块 bump + 本设计文档 + env-setup §2 归因订正 + §10.1 `key_domain` 用法 |
+
+构建校验：`external/istio` 下 `go build ./pilot/pkg/config/alikube/...` 与 api pb.go 包均通过（exit 0）。包内既有测试在本工作副本因预存问题（`kclient.RawIndexer` / 测试用了更新版 api 字段 `QuotaRule_Rule_Target.Api`）无法编译，与本改动无关。
+
+### 控制台侧（`mse/harmony-gateway-admin` `feat/quota-limit`，**改动未提交，留待该仓自行提交**）
+
+- 决策：**B —— 控制台直接声明 domain**。`QuotaDomainResolver.resolve(gwInstanceId)` 改为直接返回 `gwInstanceId`（删去反查 ConfigMap 的 K8s/DAO/cache/正则逻辑），控制台成为 domain 唯一事实源；其余 5 处调用与 Redis 写入路径不变（`rl_dc:<gwInstanceId>:cu_*`）。
+
+### 跨系统契约（端到端生效的前提）
+
+三方须用同一字符串：**控制台写 `rl_dc:<gwInstanceId>:cu_*`** ⟺ **QuotaRule CR `redis_info.key_domain = <gwInstanceId>`** ⟺ 控制器据此产出 `domain` → quota-server 读同段。控制台不负责下发 CR（决策 B），故 `key_domain` 须在 CR 下发处（当前手工/runbook §10.1）设为 `gwInstanceId`；否则 CR 无 key_domain → 控制器回落 `Kubernetes-quotarule` 与控制台写入不一致。
+
+### 待办
+
+1. CR 下发处设 `key_domain = gwInstanceId`（手工 runbook 已记；若未来控制台接管 CR 生命周期即决策 C）。
+2. 控制台 `feat/quota-limit` 预存编译问题：`DataplaneRedisManager` 的 `redis.clients.jedis` 依赖未编入（`csb-console/pom.xml` jedis 的 scope/exclusion 待查）——与本改动无关，阻塞模块整体构建。
+3. 控制台 `QuotaDomainResolver` 改动的提交由该仓推进。
