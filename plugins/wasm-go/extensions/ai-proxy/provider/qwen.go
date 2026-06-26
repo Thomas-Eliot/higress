@@ -136,6 +136,17 @@ func (m *qwenProvider) TransformRequestBodyHeaders(ctx wrapper.HttpContext, apiN
 				return newBody, err
 			}
 			modifiedBody = newBody
+		} else {
+			// Model field is absent; try wildcard mapping to inject a default model.
+			mappedModel = getMappedModel("", m.config.modelMapping)
+			if mappedModel != "" {
+				newBody, err := sjson.SetBytes(modifiedBody, "model", mappedModel)
+				if err != nil {
+					log.Errorf("Inject default model error: %v", err)
+					return newBody, err
+				}
+				modifiedBody = newBody
+			}
 		}
 		if mappedModel != "" && requestBodyHasMessageReasoningContent(modifiedBody) && qwenSupportsPreserveThinking(mappedModel) {
 			// Qwen OpenAI-compatible mode requires top-level preserve_thinking=true
