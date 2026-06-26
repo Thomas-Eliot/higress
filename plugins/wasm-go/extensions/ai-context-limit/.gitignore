@@ -1,0 +1,4 @@
+plugin.wasm
+*.wasm
+.tmp/
+.gocache/
