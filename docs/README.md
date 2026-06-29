@@ -26,6 +26,6 @@ docs/
 | 阶段 | 放什么 | 示例 |
 |------|--------|------|
 | design | 技术方案、架构设计、DDL、UML | 分片设计、迁移评估 |
-| development | 构建流程、开发环境、仓库依赖 | higress-envoy-build.md |
+| development | 构建流程、开发环境、仓库依赖、分支管理 | branch-and-repo-onboarding.md（新手先看）、higress-repo-dependencies.md |
 | testing | 测试计划、回归报告、e2e 报告 | quota-rule/ 下的多窗口测试 |
 | operations | 排障记录、故障复盘、运维脚本 | incident-*.md、patch-*.sh |
